@@ -76,7 +76,7 @@ static void gpio_init(void){
 
 	    // Configure PC13 as input and enable pull-up
 	GPIOC -> MODER &= ~(0x3u << (13 * 2));// PC13 as input
-    GPIOC -> PUPDR &= ~(0x3u << (13 * 2));// changed before
+    GPIOC -> PUPDR &= ~(0x3u << (13 * 2));
     GPIOC -> PUPDR |= (0x1u << (13 * 2));
 
     RCC -> APB2ENR |= RCC_APB2ENR_SYSCFGCOMPEN;// enable SYSCFG clk
