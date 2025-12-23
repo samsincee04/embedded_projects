@@ -1,7 +1,6 @@
 /**
 * Name:    Samuel Siakpebru
 * Date:    07/05/2025
-* Assignment: Lab 3
 * Youtube:  https://youtube.com/shorts/gSGAht8rtUo?feature=share
 
 
