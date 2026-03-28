@@ -1,0 +1,1942 @@
+/**
+ DataReceiver.m (sdkdemo)
+
+ PURPOSE:  Central router for BLE packets from the R7 ring and session manager for "Night" streaming.
+
+ This class handles:
+  1) BLE RX routing (motion / HR / SpO2)
+  2) Session state (start/stop, reconnect behavior)
+  3) Command scheduling for overnight streaming (vitals + motion loop)
+  4) Export (motion CSV + vitals JSON) + lightweight UI notifications
+  5) Watchdogs for long-running reliability (motion stalls, vitals stalls, dead-air stalls)
+
+ HIGH-LEVEL NIGHT FLOW
+ 
+ User presses Start Night -> startNightSession:
+   - Creates sessionId, writes session_start marker
+   - Enables realtimeCaptureEnabled (allows vitals packets to be processed)
+   - Sends HR_CONTROL ON (some firmwares only emit HR packets when this is enabled)
+   - Kicks off syncData (device time/user info/etc.)
+   - Starts:
+       a) Night loop scheduler (SpO2 -> Motion -> HR -> repeat)
+       b) Motion watchdog (restart motion if no packets during motion phase)
+       c) Vitals watchdog (re-send ON commands if no vitals packets during vitals phases)
+       d) Session liveness watchdog (soft reset if no packets at all for N minutes)
+
+ NIGHT LOOP TIMING
+   SpO2 phase:   kNightSpO2Seconds  (HR + O2 commands are ON)
+   Motion phase: kNightMotionSeconds (motion command ON)
+   HR phase:     kNightHRSeconds    (HR + O2 commands are ON)
+ 
+ NOTE: SpO2 + HR phases are intentionally treated the same to maximize samples.
+        (SpO2 often won’t parse/emit without HR enabled on some firmwares.)
+
+ STOP BEHAVIOR
+ stopNightSession:
+   - Writes session_end marker
+   - Stops the loop + watchdogs
+   - Force-stops HR/O2 streaming (forceStopVitalsNow)
+   - Turns HR_CONTROL OFF
+   - Flushes motion buffer + exports vitals JSONs
+
+ EXPORT FILES (Documents/)
+   motion_<sessionId>.csv
+   combined_<sessionId>.txt
+   vitals_<sessionId>.json
+
+ */
+
+//  Original version created by coolwear on 2022/9/21.
+
+#import <UIKit/UIKit.h>
+#import "DataReceiver.h"
+#import "MotionRecord.h"
+
+#import <BluetoothLibrary/BluetoothLibrary.h>
+#import <CommonCrypto/CommonCrypto.h>
+#import <BluetoothLibrary/CE_SendMotionCmd.h>
+#import <BluetoothLibrary/CE_SyncHeartRateCmd.h>
+#import <BluetoothLibrary/CE_SyncHeartO2Cmd.h>
+#import "CE_HRControlCmd.h"
+
+// If YES: only motion logs should print
+static const BOOL kLogOnlyMotion = NO;
+
+// Night pipeline: SpO2 -> Motion -> HR (repeat)
+static const NSTimeInterval kNightSpO2Seconds  = 40.0;
+static const NSTimeInterval kNightMotionSeconds = 30.0;
+static const NSTimeInterval kNightHRSeconds     = 40.0;
+
+// Use this for any NON-motion log
+#define DLOG(fmt, ...) do { if (!kLogOnlyMotion) NSLog((fmt), ##__VA_ARGS__); } while(0)
+
+typedef NS_ENUM(NSInteger, NightPhase) {
+    NightPhaseSpO2  = 0,
+    NightPhaseMotion = 1,
+    NightPhaseHR     = 2
+};
+
+@interface DataReceiver ()
+
+// RX gating / session intent
+
+/// Gate for processing vitals packets in receiveBleData (HR/O2).
+/// When NO, HR/O2 packets are ignored even if the device is sending them.
+/// During overnight streaming we keep this ON so we don't miss vitals.
+@property (nonatomic, assign) BOOL realtimeCaptureEnabled;
+
+// Absolute session start time ( epoch seconds)
+@property (nonatomic, assign) NSTimeInterval motionSessionStartTs;
+
+// Indicates whether a motion session has started
+@property (nonatomic, assign) BOOL motionSessionActive;
+
+// Motion batching
+@property (nonatomic, strong) NSMutableArray<MotionRecord *> *motionBuffer;
+@property (nonatomic, assign) NSTimeInterval lastFlushTs;
+
+// Debug throttling (used to reduce log spam
+@property (nonatomic, assign) NSUInteger motionSampleCounter;
+
+// Segmenting (Increments on reconnect)
+@property (nonatomic, assign) NSInteger motionSegmentId;
+
+// BLE heartbeat (Attempt to prevent device from sleeping or disconnecting)
+@property (nonatomic, strong) NSTimer *heartbeatTimer;
+
+// Unique session ID for CSV naming
+@property (nonatomic, strong) NSString *currentSessionId;
+
+// Controls whether motion packets are processed
+@property (nonatomic, assign) BOOL recordingActive;
+
+@property (nonatomic, assign) NSTimeInterval lastMotionPacketTs;
+@property (nonatomic, strong) dispatch_source_t motionWatchdogTimer;
+@property (nonatomic, strong) NSDictionary *latestHeartJSON;
+@property (nonatomic, strong) NSDictionary *latestSpO2JSON;
+@property (nonatomic, strong) NSMutableArray<NSDictionary *> *heartHistoryJSON;
+@property (nonatomic, strong) NSMutableArray<NSDictionary *> *spo2HistoryJSON;
+@property (nonatomic, assign) BOOL vitalsCycleRunning;
+@property (nonatomic, assign) NSInteger combinedCycle;   // increments once per full loop (SpO2->Motion->HR->SpO2)
+
+- (NSString *)documentsDir;
+@property (nonatomic, strong) NSTimer *vitalsPollTimer;
+@property (nonatomic, assign) NSTimeInterval vitalsPollInterval;
+@property (nonatomic, assign) BOOL nightSessionRunning;
+@property (nonatomic, assign) NightPhase nightPhase;
+@property (nonatomic, assign) BOOL motionWindowActive;
+@property (atomic, assign) uint64_t nightToken;
+@property (atomic, assign) BOOL bleConnected;
+@property (nonatomic, assign) BOOL wantNightRunning;
+@property (nonatomic, strong) dispatch_queue_t bleCmdQueue;
+@property (nonatomic, assign) NSTimeInterval lastVitalsPacketTs;
+@property (nonatomic, strong) dispatch_source_t vitalsWatchdogTimer;
+@property (nonatomic, assign) NSTimeInterval sessionStartTs;
+@property (nonatomic, assign) NSTimeInterval lastAnyPacketTs;
+@property (nonatomic, strong) dispatch_source_t sessionWatchdogTimer;
+@property (atomic, assign) BOOL sessionResetInProgress;
+
+@property (nonatomic, strong) dispatch_queue_t fileIOQueue;
+
+- (void)writeJSONString:(NSString *)json toFilename:(NSString *)filename;
+- (void)exportVitalsJSONToFiles;
+
+- (void) sendHeartbeat;
+
+// Cloud / storage helpers
+- (void)sendPayloadToCloud:(NSDictionary *)payload;
+- (void)bleSendCmd:(id)cmd label:(NSString *)label;
+
+// Device identity
+- (NSString *)hashedDeviceId;
+
+// Sport control
+- (void)stopSportMode;
+- (void)writeSessionStartMarker;
+- (void)writeSessionEndMarkerWithReason:(NSString *)reason endTs:(NSTimeInterval)endTs;
+- (void)startSessionLivenessWatchdog;
+- (void)stopSessionLivenessWatchdog;
+- (void)sessionSoftResetLoopWithReason:(NSString *)reason;
+
+@end
+
+@implementation DataReceiver
+
++ (instancetype)shared{
+    static DataReceiver *single = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        single = [[DataReceiver alloc] _init];
+    });
+    return single;
+}
+
+- (instancetype)_init {
+    if (self = [super init]) {
+        // BLE command serialization queue (prevents command overlap/out-of-order)
+        self.bleCmdQueue = dispatch_queue_create("com.sdkdemo.bleCmdQueue", DISPATCH_QUEUE_SERIAL);
+
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(receiveBleData:)
+                                                     name:CEProductK6ReceiveDataNoticeKey
+                                                   object:nil];
+
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(bluetoothStatusChanged:)
+                                                     name:ProductStatusChangeNoticeKey
+                                                   object:nil];
+
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(appWillResignActive)
+                                                     name:UIApplicationWillResignActiveNotification
+                                                   object:nil];
+
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(appWillTerminate)
+                                                     name:UIApplicationWillTerminateNotification
+                                                   object:nil];
+
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(appDidEnterBackground)
+                                                     name:UIApplicationDidEnterBackgroundNotification
+                                                   object:nil];
+
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(appWillEnterForeground)
+                                                     name:UIApplicationWillEnterForegroundNotification
+                                                   object:nil];
+
+        self.motionBuffer = [NSMutableArray array];
+        self.heartHistoryJSON = [NSMutableArray array];
+        self.spo2HistoryJSON  = [NSMutableArray array];
+        self.lastFlushTs = 0;
+        self.motionSegmentId = 0;
+
+        self.recordingActive = NO;
+        self.wantNightRunning = NO;
+
+        self.motionSessionActive = NO;
+        self.motionSessionStartTs = 0;
+        self.lastMotionPacketTs = 0;
+
+        self.realtimeCaptureEnabled = NO;
+        self.vitalsCycleRunning = NO;
+
+        self.nightSessionRunning = NO;
+        self.motionWindowActive = NO;
+        self.bleConnected = NO;
+        
+        self.lastVitalsPacketTs = 0;
+        self.vitalsWatchdogTimer = nil;
+        self.lastAnyPacketTs = 0;
+        self.sessionWatchdogTimer = nil;
+        self.sessionResetInProgress = NO;
+        
+        self.fileIOQueue = dispatch_queue_create("com.sdkdemo.fileIOQueue", DISPATCH_QUEUE_SERIAL);
+    }
+    return self;
+}
+
+#pragma mark - BLE Command Helper
+
+- (void)bleSendCmd:(id)cmd label:(NSString *)label {
+    if (!cmd) return;
+    dispatch_async(self.bleCmdQueue ?: dispatch_get_main_queue(), ^{
+        [[CEProductK6 shareInstance] sendCmdToDevice:cmd complete:^(NSError *error) {
+            if (error) {
+                DLOG(@"[BLE CMD] %@ failed: %@", label ?: @"cmd", error);
+            }
+        }];
+    });
+}
+
+#pragma mark - Public Session API
+// Initializes a new recording session
+// Resets buffers, counters, and session metadata
+- (void)startNightSession {
+
+    self.wantNightRunning = YES;
+
+    self.currentSessionId =
+        [NSString stringWithFormat:@"night_%@",
+         @((long)[[NSDate date] timeIntervalSince1970])];
+    
+    self.combinedCycle = 1; // start at cycle 1 for this session
+
+    // marker that captures intended start time
+    [self writeSessionStartMarker];
+
+    //Reset motion session state
+    self.motionSegmentId = 0;
+    self.motionSessionStartTs = 0;
+    self.motionSessionActive = NO;
+    self.lastFlushTs = 0;
+    self.motionSampleCounter = 0;
+    self.lastMotionPacketTs = 0;
+
+    //clear buffers
+    [self.motionBuffer removeAllObjects];
+    [self.heartHistoryJSON removeAllObjects];
+    [self.spo2HistoryJSON removeAllObjects];
+
+    // Session on
+    self.recordingActive = YES;
+    self.motionWindowActive = NO;
+
+    // Keep receiver gate ON for the whole night session
+    [self enableRealtimeCapture];
+
+    // Keep HR_CONTROL ON for the whole night session
+    CE_HRControlCmd *hrControlOn =
+        [[CE_HRControlCmd alloc] initWithOnoff:1 type:HR_CONTROL_TYPE_HR];
+    [self bleSendCmd:hrControlOn label:@"HR_CONTROL ON"];
+
+    DLOG(@"[SESSION] Started %@", self.currentSessionId);
+
+    // Watchdogs + liveness
+    [self startMotionWatchdog];
+    self.lastVitalsPacketTs = 0;
+    [self startVitalsWatchdog];
+    
+    self.lastAnyPacketTs = [[NSDate date] timeIntervalSince1970]; // grace anchor at session start
+    self.sessionResetInProgress = NO;
+    [self startSessionLivenessWatchdog];
+    
+    // Sync device and start loop
+    [self syncData];
+
+    // Start the night pipeline a couple seconds after sync finishes
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (!self.recordingActive) return;
+        [self startNightCycleTimer];
+    });
+}
+
+
+- (void)stopNightSession {
+    DLOG(@"[SESSION] Stopping %@", self.currentSessionId);
+
+    // One end timestamp used everywhere (marker + metadata)
+    NSTimeInterval endTs = [[NSDate date] timeIntervalSince1970];
+
+    // Write session_end marker using the same endTs
+    [self writeSessionEndMarkerWithReason:@"user_stop" endTs:endTs];
+
+    // Also write metadata JSON (same endTs)
+    [self writeSessionMetadataWithEndTs:endTs];
+
+    self.wantNightRunning = NO;
+    self.recordingActive = NO;
+
+    // Stop scheduler
+    [self stopNightCycleTimer];
+
+    // Turn OFF device streams safely
+    [self night_motion:NO];
+    [self forceStopVitalsNow];
+
+    // Stop watchdogs
+    [self stopMotionWatchdog];
+    [self flushMotionBatch];
+    [self stopSessionLivenessWatchdog];
+
+    // Export vitals JSONs
+    [self exportVitalsJSONToFiles];
+
+    [self stopHeartbeat];
+
+    self.motionSessionActive = NO;
+
+    // HR_CONTROL OFF at end of session
+    CE_HRControlCmd *hrControlOff =
+        [[CE_HRControlCmd alloc] initWithOnoff:0 type:HR_CONTROL_TYPE_HR];
+    [self bleSendCmd:hrControlOff label:@"HR_CONTROL OFF"];
+
+    // Receiver gate off
+    [self disableRealtimeCapture];
+
+    [self stopVitalsWatchdog];
+
+    self.lastAnyPacketTs = 0;
+    self.sessionResetInProgress = NO;
+}
+
+#pragma mark - Session Markers (Start/End)
+
+- (void)writeSessionStartMarker {
+    if (!self.currentSessionId || self.currentSessionId.length == 0) return;
+
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    self.sessionStartTs = now;
+
+    NSDictionary *payload = @{
+        @"type": @"session_start",
+        @"sessionId": self.currentSessionId,
+        @"startTs": @(now),
+        @"reason": @"user_start"
+    };
+
+    NSError *err = nil;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:payload
+                                                   options:NSJSONWritingPrettyPrinted
+                                                     error:&err];
+    if (err || !data) {
+        DLOG(@"[SESSION MARKER] Failed to build start marker JSON: %@", err);
+        return;
+    }
+
+    NSString *json = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    NSString *filename = [NSString stringWithFormat:@"session_start_%@.json", self.currentSessionId];
+
+    [self writeJSONString:json toFilename:filename];
+    DLOG(@"[SESSION MARKER] Wrote start marker %@", filename);
+}
+
+- (void)writeSessionEndMarkerWithReason:(NSString *)reason endTs:(NSTimeInterval)endTs {
+    if (!self.currentSessionId || self.currentSessionId.length == 0) return;
+
+    NSTimeInterval ts = (endTs > 0) ? endTs : [[NSDate date] timeIntervalSince1970];
+    NSString *why = (reason.length > 0) ? reason : @"user_stop";
+
+    NSMutableDictionary *payload = [@{
+        @"type": @"session_end",
+        @"sessionId": self.currentSessionId,
+        @"endTs": @(ts),
+        @"reason": why
+    } mutableCopy];
+
+    // include intended duration if start marker was written
+    if (self.sessionStartTs > 0) {
+        payload[@"intendedDurationSec"] = @(ts - self.sessionStartTs);
+    }
+
+    NSError *err = nil;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:payload
+                                                   options:NSJSONWritingPrettyPrinted
+                                                     error:&err];
+    if (err || !data) {
+        DLOG(@"[SESSION MARKER] Failed to build end marker JSON: %@", err);
+        return;
+    }
+
+    NSString *json = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    NSString *filename = [NSString stringWithFormat:@"session_end_%@.json", self.currentSessionId];
+
+    [self writeJSONString:json toFilename:filename];
+    DLOG(@"[SESSION MARKER] Wrote end marker %@", filename);
+}
+
+# pragma mark - App Lifecycle
+
+- (void)appWillResignActive {
+    DLOG(@"[APP] Will resign active — flushing motion buffer");
+    [self flushMotionBatch];
+}
+
+- (void)appWillTerminate {
+    DLOG(@"[APP] Will terminate — flushing motion buffer");
+    [self flushMotionBatch];
+}
+
+- (void)appDidEnterBackground {
+    DLOG(@"[APP] Did enter background -  flushing");
+    
+    // This avoids relying on timer-based flushes while iOS may throttle background execution.
+        if (self.recordingActive) {
+            [self flushMotionBatch];
+            self.lastFlushTs = [[NSDate date] timeIntervalSince1970]; // reset flush window anchor
+        }
+}
+
+- (void)appWillEnterForeground {
+    DLOG(@"[APP] Will enter foreground");
+    if (self.recordingActive) {
+            self.lastFlushTs = [[NSDate date] timeIntervalSince1970];
+        }
+}
+
+#pragma mark - Combined TXT Guards
+
+- (BOOL)shouldWriteCombinedRows {
+    // Only when user explicitly started a night session
+    // (wantNightRunning stays YES until Stop Night)
+    if (!self.wantNightRunning) return NO;
+    if (!self.recordingActive) return NO;
+
+    // Must have a session id
+    if (self.currentSessionId.length == 0) return NO;
+
+    return YES;
+}
+#pragma mark - Night Command Guards
+
+
+- (BOOL)nightCanSendCommands {
+    return self.bleConnected && self.nightSessionRunning;
+}
+
+- (BOOL)nightCanSendStopCommands {
+    // used for OFF commands (safe even after we flip flags)
+    return YES;
+}
+
+#pragma mark - Night Device commands
+
+// Motion ON/OFF
+- (void)night_motion:(BOOL)on {
+
+    // ON requires active night session; OFF should still be allowed during teardown.
+    if (on) {
+        if (![self nightCanSendCommands]) return;
+    } else {
+        if (![self nightCanSendStopCommands]) return;
+    }
+
+    CE_SendMotionCmd *cmd = [[CE_SendMotionCmd alloc] init];
+    cmd.onoff = on ? 1 : 0;
+    [[CEProductK6 shareInstance] sendCmdToDevice:cmd complete:nil];
+    DLOG(@"[NIGHT] Motion %@", on ? @"ON" : @"OFF");
+}
+
+- (void)night_stopVitalsAll {
+    // Do NOT stop vitals during an active night session.
+    // Stopping vitals depends on timers to re-enable them, and iOS can pause those.
+    // We will only stop vitals on stopNightSession.
+    if (self.wantNightRunning || self.nightSessionRunning || self.recordingActive) {
+        DLOG(@"[NIGHT] stopVitalsAll skipped (session running)");
+        return;
+    }
+
+    // If we truly are not running, allow stop
+    CE_SyncHeartO2Cmd *o2Off = [[CE_SyncHeartO2Cmd alloc] init];
+    o2Off.status = 0;
+    [self bleSendCmd:o2Off label:@"O2 OFF"];
+
+    CE_SyncHeartRateCmd *hrOff = [[CE_SyncHeartRateCmd alloc] init];
+    hrOff.status = 0;
+    [self bleSendCmd:hrOff label:@"HR OFF"];
+
+    DLOG(@"[NIGHT] stopVitalsAll: HR/O2 OFF");
+}
+- (void)night_spo2On {
+    if (![self nightCanSendCommands]) return;
+    self.nightPhase = NightPhaseSpO2;
+
+    // receiver gate stays enabled for entire night session, but safe to ensure
+    [self enableRealtimeCapture];
+
+    // HR ON + O2 ON (HR_CONTROL already ON from startNightSession)
+    CE_SyncHeartRateCmd *hrOn = [[CE_SyncHeartRateCmd alloc] init];
+    hrOn.status = 1;
+    [self bleSendCmd:hrOn label:@"HR ON (SpO2 phase)"];
+
+    CE_SyncHeartO2Cmd *o2On = [[CE_SyncHeartO2Cmd alloc] init];
+    o2On.status = 1;
+    [self bleSendCmd:o2On label:@"O2 ON"];
+
+    DLOG(@"[NIGHT] SpO2 ON (HR + O2; HR_CONTROL already ON)");
+}
+
+- (void)night_spo2Off {
+    DLOG(@"[NIGHT] SpO2 OFF");
+}
+
+- (void)night_hrOn {
+    if (![self nightCanSendCommands]) return;
+    self.nightPhase = NightPhaseHR;
+
+    [self enableRealtimeCapture];
+
+    CE_SyncHeartO2Cmd *o2On = [[CE_SyncHeartO2Cmd alloc] init];
+    o2On.status = 1;
+    [self bleSendCmd:o2On label:@"O2 ON (HR phase)"];
+
+    CE_SyncHeartRateCmd *hrOn = [[CE_SyncHeartRateCmd alloc] init];
+    hrOn.status = 1;
+    [self bleSendCmd:hrOn label:@"HR ON (HR phase)"];
+
+    DLOG(@"[NIGHT] HR ON (HR only; HR_CONTROL already ON)");
+}
+
+- (void)night_hrOff {
+    DLOG(@"[NIGHT] HR OFF");
+}
+
+- (void)forceStopVitalsNow {
+    CE_SyncHeartO2Cmd *o2Off = [[CE_SyncHeartO2Cmd alloc] init];
+    o2Off.status = 0;
+    [self bleSendCmd:o2Off label:@"O2 OFF (force)"];
+
+    CE_SyncHeartRateCmd *hrOff = [[CE_SyncHeartRateCmd alloc] init];
+    hrOff.status = 0;
+    [self bleSendCmd:hrOff label:@"HR OFF (force)"];
+
+    DLOG(@"[NIGHT] forceStopVitalsNow: HR/O2 OFF");
+}
+
+#pragma mark - Night Loop Scheduler
+/**
+ Night loop state machine
+
+ We use (nightPhase + nightToken) to manage the repeating loop.
+ - nightPhase indicates which phase we are currently in.
+ - nightToken invalidates any previously scheduled dispatch_after blocks.
+
+ Phase transitions:
+   SpO2 phase:
+     - keep HR + O2 ON (night_spo2On)
+     - after kNightSpO2Seconds -> transition to Motion phase
+   Motion phase:
+     - enable motionWindowActive
+     - send motion ON
+     - after kNightMotionSeconds -> transition to HR phase
+   HR phase:
+     - keep HR + O2 ON (night_hrOn)
+     - after kNightHRSeconds -> transition back to SpO2
+ */
+
+- (void)startNightCycleTimer {
+    if (self.nightSessionRunning) return;
+
+    self.nightSessionRunning = YES;
+    [self enableRealtimeCapture];
+    self.nightToken += 1;
+    uint64_t token = self.nightToken;
+
+    self.motionWindowActive = NO;
+
+    [self night_motion:NO];
+
+    self.nightPhase = NightPhaseSpO2;
+    [self night_spo2On];
+
+    [self night_scheduleNextStepAfter:kNightSpO2Seconds token:token];
+}
+- (void)stopNightCycleTimer {
+    self.nightSessionRunning = NO;
+    self.nightToken += 1;
+    self.motionWindowActive = NO;
+
+    [self night_motion:NO];
+    [self night_stopVitalsAll];
+
+    DLOG(@"[NIGHT] Cycle stopped");
+}
+
+- (void)night_scheduleNextStepAfter:(NSTimeInterval)sec token:(uint64_t)token {
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(sec * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        if (!self.nightSessionRunning) return;
+        if (self.nightToken != token) return;
+        [self night_stepWithToken:token];
+    });
+}
+
+- (void)night_stepWithToken:(uint64_t)token {
+    if (!self.nightSessionRunning) return;
+    if (self.nightToken != token) return;
+
+    switch (self.nightPhase) {
+
+        // SpO2 -> Motion
+        case NightPhaseSpO2: {
+            [self night_spo2Off];
+
+            self.nightPhase = NightPhaseMotion;
+            self.motionWindowActive = YES;
+
+            __weak typeof(self) weakSelf = self;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                __strong typeof(weakSelf) self = weakSelf;
+                if (!self || !self.nightSessionRunning) return;
+                if (self.nightToken != token) return;
+                if (self.nightPhase != NightPhaseMotion) return;
+                [self night_motion:YES];
+            });
+
+            [self night_scheduleNextStepAfter:(2.0 + kNightMotionSeconds) token:token];
+            break;
+        }
+
+        // Motion -> HR
+        case NightPhaseMotion: {
+            self.motionWindowActive = NO;
+            [self night_motion:NO];
+
+            // set phase now; HR ON will also set phase but this keeps the state consistent during the dead-time
+            self.nightPhase = NightPhaseHR;
+
+            __weak typeof(self) weakSelf = self;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                __strong typeof(weakSelf) self = weakSelf;
+                if (!self || !self.nightSessionRunning) return;
+                if (self.nightToken != token) return;
+                if (self.nightPhase != NightPhaseHR) return;
+                [self night_hrOn];
+            });
+
+            [self night_scheduleNextStepAfter:(2.0 + kNightHRSeconds) token:token];
+            break;
+        }
+
+        // HR -> SpO2
+        case NightPhaseHR: {
+            [self night_hrOff];
+
+            self.combinedCycle += 1;
+            // set phase now; SpO2 ON will also set phase but keeps state consistent during dead-time
+            self.nightPhase = NightPhaseSpO2;
+
+            __weak typeof(self) weakSelf = self;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                __strong typeof(weakSelf) self = weakSelf;
+                if (!self || !self.nightSessionRunning) return;
+                if (self.nightToken != token) return;
+                if (self.nightPhase != NightPhaseSpO2) return;
+                [self night_spo2On];
+            });
+
+            [self night_scheduleNextStepAfter:(2.0 + kNightSpO2Seconds) token:token];
+            break;
+        }
+    }
+}
+
+# pragma mark - Motion Normalization / Flush
+// Converts raw motion dictionary into structured MotionRecord
+// Adds timestamps, session delta, and metadata
+
+- (MotionRecord *)normalizeMotion144:(NSDictionary *)data {
+
+    NSDictionary *motion = data[@"data"];
+    if (![motion isKindOfClass:[NSDictionary class]]) {
+        return nil;
+    }
+
+    MotionRecord *record = [[MotionRecord alloc] init];
+    record.deviceId = [self hashedDeviceId];
+    
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    record.timestamp = now;
+
+    // Self-healing motion session start
+    if (!self.motionSessionActive) {
+        self.motionSessionStartTs = now;
+        self.motionSessionActive = YES;
+        record.deltaSeconds = 0;   // first packet anchor
+    } else {
+        record.deltaSeconds = now - self.motionSessionStartTs;
+    }
+    
+    
+    record.source = @"ios_sdk";
+    record.datatype = 144;
+    record.segmentId = self.motionSegmentId;
+
+    record.x = [motion[@"x"] integerValue];
+    record.y = [motion[@"y"] integerValue];
+    record.speedThrow = [motion[@"speed_throw"] integerValue];
+
+    return record;
+}
+
+// Flush 60-sec motion buffer to cloud(mock), CSV file
+- (void)flushMotionBatch {
+    if (self.motionBuffer.count == 0) return;
+    
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    NSLog(@"[BATCH] Flushing %lu motion records (%.2fs window)",
+         (unsigned long)self.motionBuffer.count,
+         now - self.lastFlushTs);
+
+    // Cloud payload (array)
+    NSMutableArray *jsonArray = [NSMutableArray arrayWithCapacity:self.motionBuffer.count];
+    for (MotionRecord *r in self.motionBuffer) {
+        [jsonArray addObject:[r toJSON]];
+    }
+
+    [self sendPayloadToCloud:@{
+        @"records": jsonArray,
+        @"count": @(jsonArray.count)
+    }];
+
+    //  CSV write (append all lines)
+    NSMutableString *csvBlock = [NSMutableString string];
+    for (MotionRecord *r in self.motionBuffer) {
+        [csvBlock appendString:[r toCSV]];
+    }
+
+    NSString *header =
+    @"device_id,timestamp,delta_seconds,source,datatype,segment_id,x,y,speed_throw\n";
+
+    [self appendLine:csvBlock
+          withHeader:header
+              forType:DATA_TYPE_MOTION_DATA];
+
+    // Clear buffer
+    [self.motionBuffer removeAllObjects];
+}
+
+# pragma mark - BLE Receive Entry Point
+// Main BLE packet entry point
+// Routes packets based on DataType
+
+- (void)receiveBleData:(NSNotification *)noti {
+
+    NSDictionary *receiveData = noti.userInfo;
+    if (!receiveData) return;
+
+    NSLog(@"[RX] DataType(raw)=%@", receiveData[@"DataType"]);
+
+    K6_DataFuncType dataFuncType =
+        (K6_DataFuncType)[receiveData[@"DataType"] integerValue];
+    DLOG(@"[DEBUG] DataType=%ld", (long)dataFuncType);
+
+    id data = receiveData[@"Data"];
+    NSLog(@"[RX] DataType=%@ DataClass=%@",
+          receiveData[@"DataType"],
+          NSStringFromClass([data class]));
+
+    if (!data) return;
+
+    if ([data isKindOfClass:[NSDictionary class]]) {
+        NSLog(@"[RX] DataType=%@ keys=%@", receiveData[@"DataType"], [(NSDictionary *)data allKeys]);
+    } else {
+        NSLog(@"[RX] DataType=%@ dataClass=%@", receiveData[@"DataType"], NSStringFromClass([data class]));
+    }
+
+    switch (dataFuncType) {
+
+        case DATA_TYPE_MOTION_DATA: {
+            if (!self.recordingActive || !self.motionWindowActive) break;
+
+            // touch liveness timestamps
+            NSTimeInterval rxNow = [[NSDate date] timeIntervalSince1970];
+            self.lastMotionPacketTs = rxNow;
+            self.lastAnyPacketTs = rxNow;
+
+            if (![data isKindOfClass:[NSDictionary class]]) break;
+            NSDictionary *motion = ((NSDictionary *)data)[@"data"];
+            if (![motion isKindOfClass:[NSDictionary class]]) break;
+
+            self.motionSampleCounter++;
+            if (self.motionSampleCounter % 3000 == 0) {
+                NSLog(@"[MOTION144] sample x=%@ y=%@ speed=%@ (segment=%ld)",
+                      motion[@"x"], motion[@"y"], motion[@"speed_throw"],
+                      (long)self.motionSegmentId);
+            }
+            
+            // Combined TXT row (ACCEL)
+            NSString *ax = [NSString stringWithFormat:@"%ld", (long)[motion[@"x"] integerValue]];
+            NSString *ay = [NSString stringWithFormat:@"%ld", (long)[motion[@"y"] integerValue]];
+            NSString *az = [NSString stringWithFormat:@"%ld", (long)[motion[@"speed_throw"] integerValue]];
+
+            [self appendCombinedRowWithTs:rxNow
+                                    cycle:self.combinedCycle
+                                     step:@"ACCEL"
+                                      bpm:@"-"
+                                   accelX:ax
+                                   accelY:ay
+                                   accelZ:az
+                                     spo2:@"-"];
+
+            MotionRecord *record = [self normalizeMotion144:(NSDictionary *)data];
+            if (!record) break;
+
+            [self.motionBuffer addObject:record];
+
+            NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+            if (self.lastFlushTs == 0) self.lastFlushTs = now;
+
+            if (now - self.lastFlushTs >= 60.0) {
+                [self flushMotionBatch];
+                self.lastFlushTs = now;
+            }
+            break;
+        }
+
+        case DATA_TYPE_REAL_SPORT:
+        case DATA_TYPE_HISTORY_SPORT:
+            break;
+
+        case DATA_TYPE_REAL_HEART: {
+            if (!self.realtimeCaptureEnabled) break;
+            if (![data isKindOfClass:[NSDictionary class]]) break;
+
+            NSDictionary *root = (NSDictionary *)data;
+
+            id heartInfosObj = root[@"heartInfos"];
+            if (!heartInfosObj) {
+                NSDictionary *nested = root[@"data"];
+                if ([nested isKindOfClass:[NSDictionary class]]) {
+                    heartInfosObj = nested[@"heartInfos"];
+                }
+            }
+
+            if (![heartInfosObj isKindOfClass:[NSArray class]] || ((NSArray *)heartInfosObj).count == 0) break;
+
+            NSDictionary *latest = ((NSArray *)heartInfosObj).firstObject;
+            if (![latest isKindOfClass:[NSDictionary class]]) break;
+
+            NSInteger bpm = 0;
+            if (latest[@"heartNum"]) bpm = [latest[@"heartNum"] integerValue];
+            else if (latest[@"bpm"]) bpm = [latest[@"bpm"] integerValue];
+            else if (latest[@"hr"]) bpm = [latest[@"hr"] integerValue];
+
+            if (bpm <= 0) break;
+
+            NSTimeInterval deviceTs = 0;
+            if (latest[@"time"]) deviceTs = [latest[@"time"] doubleValue];
+
+            NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+            NSTimeInterval tsToUse = now;
+            
+            if (deviceTs > 0 && fabs(deviceTs - now) < (7.0 * 24.0 * 60.0 * 60.0)) {
+                tsToUse = deviceTs;
+            }
+            
+            // Combined TXT row (BPM)
+            [self appendCombinedRowWithTs:tsToUse
+                                    cycle:self.combinedCycle
+                                     step:@"BPM"
+                                      bpm:[NSString stringWithFormat:@"%ld", (long)bpm]
+                                  accelX:@"-"
+                                  accelY:@"-"
+                                  accelZ:@"-"
+                                    spo2:@"-"];
+            
+
+        
+
+            NSTimeInterval delta = 0;
+            if (self.motionSessionActive) {
+                NSTimeInterval d = tsToUse - self.motionSessionStartTs;
+                delta = (d < 0) ? 0 : d;
+            }
+
+            NSDictionary *hrJSON = @{
+                @"device_id": [self hashedDeviceId] ?: @"",
+                @"timestamp": @(tsToUse),
+                @"delta_seconds": @(delta),
+                @"segment_id": @(self.motionSegmentId),
+                @"bpm": @(bpm),
+                @"phase": @(self.nightPhase)
+            };
+
+            // touch liveness timestamps (vitals + any)
+            NSTimeInterval rxNow = [[NSDate date] timeIntervalSince1970];
+            self.lastVitalsPacketTs = rxNow;
+            self.lastAnyPacketTs = rxNow;
+
+            NSLog(@"[HR PARSED] bpm=%ld phase=%ld", (long)bpm, (long)self.nightPhase);
+
+            [self publishRealtimeHeartJSON:hrJSON];
+            [self appendRolling:self.heartHistoryJSON sample:hrJSON];
+            break;
+        }
+
+        case DATA_TYPE_REAL_O2: {
+            if (!self.realtimeCaptureEnabled) break;
+            if (![data isKindOfClass:[NSDictionary class]]) break;
+
+            NSDictionary *o2Root = (NSDictionary *)data;
+            id payload = o2Root[@"data"];
+
+            NSDictionary *latest = nil;
+
+            if ([payload isKindOfClass:[NSArray class]]) {
+                NSArray *arr = (NSArray *)payload;
+                if (arr.count > 0 && [arr[0] isKindOfClass:[NSDictionary class]]) {
+                    latest = arr[0];
+                }
+            } else if ([payload isKindOfClass:[NSDictionary class]]) {
+                latest = (NSDictionary *)payload;
+            }
+
+            if (![latest isKindOfClass:[NSDictionary class]]) break;
+
+            id inner = latest[@"data"];
+            if ([inner isKindOfClass:[NSArray class]]) {
+                NSArray *innerArr = (NSArray *)inner;
+                if (innerArr.count > 0 && [innerArr[0] isKindOfClass:[NSDictionary class]]) {
+                    latest = innerArr[0];
+                }
+            } else if ([inner isKindOfClass:[NSDictionary class]]) {
+                latest = (NSDictionary *)inner;
+            }
+
+            if (![latest isKindOfClass:[NSDictionary class]]) break;
+
+            NSInteger spo2 = 0;
+            if (latest[@"oxygen"]) spo2 = [latest[@"oxygen"] integerValue];
+            else if (latest[@"spo2"]) spo2 = [latest[@"spo2"] integerValue];
+            else if (latest[@"o2"]) spo2 = [latest[@"o2"] integerValue];
+
+            NSTimeInterval deviceTs = 0;
+            if (latest[@"time"]) deviceTs = [latest[@"time"] doubleValue];
+
+            if (spo2 <= 0) break;
+
+            NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+            NSTimeInterval tsToUse = now;
+            if (deviceTs > 0 && fabs(deviceTs - now) < (7.0 * 24.0 * 60.0 * 60.0)) {
+                tsToUse = deviceTs;
+            }
+            
+            // Combined TXT row (SPO2)
+            [self appendCombinedRowWithTs:tsToUse
+                                    cycle:self.combinedCycle
+                                     step:@"SPO2"
+                                      bpm:@"-"
+                                  accelX:@"-"
+                                  accelY:@"-"
+                                  accelZ:@"-"
+                                    spo2:[NSString stringWithFormat:@"%ld", (long)spo2]];
+
+            NSDictionary *o2JSON = @{
+                @"device_id": [self hashedDeviceId] ?: @"",
+                @"timestamp": @(tsToUse),
+                @"segment_id": @(self.motionSegmentId),
+                @"spo2": @(spo2),
+                @"phase": @(self.nightPhase)
+            };
+
+            //  touch liveness timestamps (vitals + any)
+            NSTimeInterval rxNow = [[NSDate date] timeIntervalSince1970];
+            self.lastVitalsPacketTs = rxNow;
+            self.lastAnyPacketTs = rxNow;
+
+            static NSInteger o2Counter = 0;
+            o2Counter++;
+            if (o2Counter % 5 == 0) {
+                DLOG(@"[SPO2 PARSED] spo2=%ld phase=%ld", (long)spo2, (long)self.nightPhase);
+            }
+
+            [self publishRealtimeSpO2JSON:o2JSON];
+            [self appendRolling:self.spo2HistoryJSON sample:o2JSON];
+            break;
+        }
+
+        default:
+            break;
+    }
+
+    [NSNotificationCenter.defaultCenter postNotificationName:@"DataReceivceFinish" object:nil];
+}
+    
+#pragma mark - Combined TXT (Motion + HR + SpO2 in one schema)
+
+static NSString * const kCombinedHeaderTSV =
+    @"timestamp\tcycle\tstep\tbpm\taccel_x\taccel_y\taccel_z\tspo2\n";
+
+- (NSString *)combinedPath {
+    NSString *docs =
+        NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                            NSUserDomainMask,
+                                            YES).firstObject;
+
+    NSString *sid = self.currentSessionId ?: @"default";
+    // Intentionally .txt (tab-delimited)
+    return [docs stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"combined_%@.txt", sid]];
+}
+
+- (NSString *)formatISO8601:(NSTimeInterval)ts {
+    static NSDateFormatter *fmt = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        fmt = [[NSDateFormatter alloc] init];
+        fmt.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+        fmt.timeZone = [NSTimeZone timeZoneWithAbbreviation:@"UTC"];
+        fmt.dateFormat = @"yyyy-MM-dd'T'HH:mm:ss.SSS'Z'";
+    });
+
+    return [fmt stringFromDate:[NSDate dateWithTimeIntervalSince1970:ts]];
+}
+
+- (NSString *)formatTimestampMs:(NSTimeInterval)ts {
+    static NSDateFormatter *fmt = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        fmt = [[NSDateFormatter alloc] init];
+        fmt.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+        fmt.timeZone = [NSTimeZone localTimeZone];
+        fmt.dateFormat = @"yyyy-MM-dd HH:mm:ss.SSS";
+    });
+    return [fmt stringFromDate:[NSDate dateWithTimeIntervalSince1970:ts]];
+}
+
+- (void)appendCombinedRowWithTs:(NSTimeInterval)ts
+                          cycle:(NSInteger)cycle
+                           step:(NSString *)step
+                            bpm:(NSString *)bpm
+                         accelX:(NSString *)ax
+                         accelY:(NSString *)ay
+                         accelZ:(NSString *)az
+                           spo2:(NSString *)spo2
+{
+    // Only write combined_*.txt during Start Night sessions
+    if (![self shouldWriteCombinedRows]) return;
+
+    // Capture immutable values for async block
+    NSString *path = [self combinedPath];
+    if (path.length == 0) return;
+
+    NSString *tsStr = [self formatTimestampMs:ts];
+    NSString *row = [NSString stringWithFormat:@"%@\t%ld\t%@\t%@\t%@\t%@\t%@\t%@\n",
+                     tsStr,
+                     (long)cycle,
+                     step ?: @"-",
+                     bpm  ?: @"-",
+                     ax   ?: @"-",
+                     ay   ?: @"-",
+                     az   ?: @"-",
+                     spo2 ?: @"-"];
+
+    dispatch_queue_t q = self.fileIOQueue ?: dispatch_get_global_queue(QOS_CLASS_UTILITY, 0);
+
+    dispatch_async(q, ^{
+        // Re-check inside async to avoid writing after Stop Night
+        if (![self shouldWriteCombinedRows]) return;
+
+        // Ensure file exists + header written once (serialized by fileIOQueue)
+        if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+            [kCombinedHeaderTSV writeToFile:path
+                                 atomically:YES
+                                   encoding:NSUTF8StringEncoding
+                                      error:nil];
+        }
+
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+        if (!fh) return;
+
+        [fh seekToEndOfFile];
+        [fh writeData:[row dataUsingEncoding:NSUTF8StringEncoding]];
+        [fh closeFile];
+    });
+}
+#pragma mark - Session metadata writer
+
+- (void)writeSessionMetadataWithEndTs:(NSTimeInterval)endTs {
+    if (!self.currentSessionId || self.currentSessionId.length == 0) return;
+    if (self.sessionStartTs <= 0) return;
+
+    NSTimeInterval endTime = (endTs > 0) ? endTs : [[NSDate date] timeIntervalSince1970];
+
+    NSDictionary *meta = @{
+        @"patient_id": @"unknown",
+        @"session_id": self.currentSessionId ?: @"",
+        @"measurement_device": ([self hashedDeviceId] ?: @"R7 ring"),
+        @"platform": @"ios",
+        @"start_time": [self formatISO8601:self.sessionStartTs] ?: @"",
+        @"end_time": [self formatISO8601:endTime] ?: @"",
+        @"cycles": @((int)self.combinedCycle)
+    };
+
+    NSError *err = nil;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:meta
+                                                   options:NSJSONWritingPrettyPrinted
+                                                     error:&err];
+    if (err || !data) {
+        DLOG(@"[METADATA] Failed to build metadata JSON: %@", err);
+        return;
+    }
+
+    NSString *json = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    NSString *filename = [NSString stringWithFormat:@"metadata_%@.json", self.currentSessionId];
+
+    [self writeJSONString:json toFilename:filename];
+    DLOG(@"[METADATA] Wrote %@", filename);
+}
+#pragma mark - Unified CSV helpers
+
+- (NSString *)csvPathForType:(NSInteger)datatype {
+    NSString *docs =
+        NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                            NSUserDomainMask,
+                                            YES).firstObject;
+
+    switch (datatype) {
+        case DATA_TYPE_MOTION_DATA:
+            return [docs stringByAppendingPathComponent:
+                [NSString stringWithFormat:@"motion_%@.csv",
+                 self.currentSessionId ?: @"default"]];
+            
+        default:
+            return nil;
+    }
+}
+
+- (void)appendLine:(NSString *)line
+        withHeader:(NSString *)header
+        forType:(NSInteger)datatype {
+
+    NSString *path = [self csvPathForType:datatype];
+    DLOG(@"[CSV] Writing to %@", path);
+    
+    if (!path) return;
+
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        [header writeToFile:path
+                 atomically:YES
+                   encoding:NSUTF8StringEncoding
+                      error:nil];
+    }
+
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+    if (!fh) return;
+
+    [fh seekToEndOfFile];
+    [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+    [fh closeFile];
+}
+
+- (NSString *)documentsDir {
+    return NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+}
+
+- (void)writeJSONString:(NSString *)json toFilename:(NSString *)filename {
+    if (json.length == 0 || filename.length == 0) return;
+
+    NSString *path = [[self documentsDir] stringByAppendingPathComponent:filename];
+    NSError *err = nil;
+    BOOL ok = [json writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&err];
+
+    if (ok && !err) {
+        NSLog(@"[EXPORT] Wrote %@", path);
+    } else {
+        NSLog(@"[EXPORT] Failed to write %@ err=%@", filename, err);
+    }
+}
+
+// Do NOT disable realtime capture here during night session
+- (void)night_stopVitalsDeviceOnly {
+    CE_SyncHeartO2Cmd *o2Off = [CE_SyncHeartO2Cmd new];
+    o2Off.status = 0;
+    [[CEProductK6 shareInstance] sendCmdToDevice:o2Off complete:nil];
+
+    CE_SyncHeartRateCmd *hrOff = [CE_SyncHeartRateCmd new];
+    hrOff.status = 0;
+    [[CEProductK6 shareInstance] sendCmdToDevice:hrOff complete:nil];
+
+    //keep HR_CONTROL ON across the entire night session
+}
+- (void)exportVitalsJSONToFiles {
+    NSString *sid = self.currentSessionId ?: [NSString stringWithFormat:@"night_%ld", (long)[NSDate date].timeIntervalSince1970];
+
+    NSString *bundle = [self exportAllRealtimeHistoryToJSON];
+    if (bundle.length == 0) {
+        DLOG(@"[EXPORT] No vitals bundle to write (empty)");
+        return;
+    }
+
+    [self writeJSONString:bundle toFilename:[NSString stringWithFormat:@"vitals_%@.json", sid]];
+    DLOG(@"[EXPORT] Wrote vitals_%@.json (bundle only)", sid);
+}
+
+- (void)startVitalsCycleEvery:(NSTimeInterval)periodSec vitalsWindow:(NSTimeInterval)windowSec {
+
+    // periodSec controls "every X minutes"
+    NSTimeInterval interval = (periodSec > 0) ? periodSec : 300.0;
+
+    // If Start Night was never pressed, create a session id for vitals files
+    if (!self.currentSessionId || self.currentSessionId.length == 0) {
+        self.currentSessionId =
+            [NSString stringWithFormat:@"vitals_%@",
+             @((long)[[NSDate date] timeIntervalSince1970])];
+    }
+
+    // Clear previous vitals history so STOP exports only this run
+    [self.heartHistoryJSON removeAllObjects];
+    [self.spo2HistoryJSON removeAllObjects];
+    
+
+    self.vitalsCycleRunning = YES;
+    [self startVitalsPollingEvery:interval];
+
+    NSLog(@"[VITALS] started (poll every %.0fs) session=%@", interval, self.currentSessionId);
+}
+
+- (void)stopVitalsCycle {
+
+    self.vitalsCycleRunning = NO;
+    //self.vitalsMeasuring = NO;
+
+    [self stopVitalsPolling];
+
+    // stop device-side measurement (safe)
+    CE_SyncHeartRateCmd *hrOff = [[CE_SyncHeartRateCmd alloc] init];
+    hrOff.status = 0;
+    [[CEProductK6 shareInstance] sendCmdToDevice:hrOff complete:nil];
+
+    CE_SyncHeartO2Cmd *o2Off = [[CE_SyncHeartO2Cmd alloc] init];
+    o2Off.status = 0;
+    [[CEProductK6 shareInstance] sendCmdToDevice:o2Off complete:nil];
+
+    CE_HRControlCmd *hrStop = [[CE_HRControlCmd alloc] initWithOnoff:0 type:HR_CONTROL_TYPE_HR];
+    [[CEProductK6 shareInstance] sendCmdToDevice:hrStop complete:nil];
+
+    [self disableRealtimeCapture];
+
+    NSLog(@"[VITALS] stopVitalsCycle: HR_count=%lu O2_count=%lu",
+          (unsigned long)self.heartHistoryJSON.count,
+          (unsigned long)self.spo2HistoryJSON.count);
+
+    // EXPORT NOW
+    [self exportVitalsJSONToFiles];
+
+    NSLog(@"[VITALS] stopped + exported JSONs");
+}
+
+static const NSTimeInterval kVitalsPollIntervalSec = 5.0 * 60.0; // 5 minutes
+
+- (void)startVitalsPollingEvery:(NSTimeInterval)seconds {
+    self.vitalsPollInterval = (seconds > 0) ? seconds : kVitalsPollIntervalSec;
+
+    // make sure we accept incoming packets
+    [self enableRealtimeCapture];
+
+    // stop any existing timer
+    [self stopVitalsPolling];
+
+    // fire once immediately
+    [self triggerVitalsMeasurementOnce];
+
+    // then repeat
+    self.vitalsPollTimer =
+        [NSTimer scheduledTimerWithTimeInterval:self.vitalsPollInterval
+                                         target:self
+                                       selector:@selector(triggerVitalsMeasurementOnce)
+                                       userInfo:nil
+                                        repeats:YES];
+
+    [[NSRunLoop mainRunLoop] addTimer:self.vitalsPollTimer forMode:NSRunLoopCommonModes];
+
+    NSLog(@"[VITALS] polling started interval=%.0fs", self.vitalsPollInterval);
+}
+
+- (void)stopVitalsPolling {
+    if (self.vitalsPollTimer) {
+        [self.vitalsPollTimer invalidate];
+        self.vitalsPollTimer = nil;
+    }
+    NSLog(@"[VITALS] polling stopped");
+}
+
+- (void)triggerVitalsMeasurementOnce {
+
+    CE_HRControlCmd *hrStart = [[CE_HRControlCmd alloc] initWithOnoff:1 type:HR_CONTROL_TYPE_HR];
+    [[CEProductK6 shareInstance] sendCmdToDevice:hrStart complete:nil];
+
+    // HR
+    CE_SyncHeartRateCmd *hr = [[CE_SyncHeartRateCmd alloc] init];
+    hr.status = 1;
+    [[CEProductK6 shareInstance] sendCmdToDevice:hr complete:nil];
+
+    // SpO2
+    CE_SyncHeartO2Cmd *o2 = [[CE_SyncHeartO2Cmd alloc] init];
+    o2.status = 1;
+    [[CEProductK6 shareInstance] sendCmdToDevice:o2 complete:nil];
+
+    // Give the device time to produce packets BEFORE turning off.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(75.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+
+        CE_SyncHeartRateCmd *hrOff = [[CE_SyncHeartRateCmd alloc] init];
+        hrOff.status = 0;
+        [[CEProductK6 shareInstance] sendCmdToDevice:hrOff complete:nil];
+
+        CE_SyncHeartO2Cmd *o2Off = [[CE_SyncHeartO2Cmd alloc] init];
+        o2Off.status = 0;
+        [[CEProductK6 shareInstance] sendCmdToDevice:o2Off complete:nil];
+
+        CE_HRControlCmd *hrStop = [[CE_HRControlCmd alloc] initWithOnoff:0 type:HR_CONTROL_TYPE_HR];
+        [[CEProductK6 shareInstance] sendCmdToDevice:hrStop complete:nil];
+    });
+
+    NSLog(@"[VITALS] triggerVitalsMeasurementOnce sent (HR_CONTROL + HR/O2 ON)");
+}
+
+
+# pragma mark - Motion Watchdog
+
+- (void)startMotionWatchdog {
+    if (self.motionWatchdogTimer) return;
+
+    dispatch_queue_t q = dispatch_get_global_queue(QOS_CLASS_UTILITY, 0);
+    self.motionWatchdogTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
+
+    dispatch_source_set_timer(self.motionWatchdogTimer,
+                              dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC),
+                              15 * NSEC_PER_SEC,
+                              2 * NSEC_PER_SEC);
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_source_set_event_handler(self.motionWatchdogTimer, ^{
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        if (!self.recordingActive) return;
+        if (!self.motionWindowActive) return;            // only enforce in motion phase
+        if (!self.bleConnected) return;
+        if (!self.nightSessionRunning) return;
+        if (self.nightPhase != NightPhaseMotion) return;
+
+        NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+
+        // Less aggressive threshold (devices can pause)
+        if (self.lastMotionPacketTs > 0 && (now - self.lastMotionPacketTs) > 60.0) {
+            DLOG(@"[WATCHDOG] No MOTION144 for %.1fs -> restarting motion stream", now - self.lastMotionPacketTs);
+
+            CE_SendMotionCmd *off = [[CE_SendMotionCmd alloc] init];
+            off.onoff = 0;
+            [self bleSendCmd:off label:@"Motion OFF (watchdog)"];
+
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                if (!self.recordingActive) return;
+                if (!self.motionWindowActive) return;
+                if (!self.bleConnected) return;
+                if (!self.nightSessionRunning) return;
+                if (self.nightPhase != NightPhaseMotion) return;
+
+                // Do NOT send CE_SensorCmd here; it causes command spam/disconnects
+                CE_SendMotionCmd *on = [[CE_SendMotionCmd alloc] init];
+                on.onoff = 1;
+                [self bleSendCmd:on label:@"Motion ON (watchdog)"];
+            });
+        }
+    });
+
+    dispatch_resume(self.motionWatchdogTimer);
+    DLOG(@"[WATCHDOG] started");
+}
+
+- (void)stopMotionWatchdog {
+    if (!self.motionWatchdogTimer) return;
+    dispatch_source_cancel(self.motionWatchdogTimer);
+    self.motionWatchdogTimer = nil;
+    DLOG(@"[WATCHDOG] stopped");
+}
+
+
+#pragma mark - Motion Forwarding (Stub)
+
+- (void)sendPayloadToCloud:(NSDictionary *)payload {
+    // will replace this with real networking
+    DLOG(@"[CLOUD MOCK] %@", payload);
+}
+
+
+# pragma mark - Publish Real time heart rate and Blood Oxygen
+
+- (void)publishRealtimeHeartJSON:(NSDictionary *)json {
+    if (![json isKindOfClass:[NSDictionary class]]) return;
+    self.latestHeartJSON = json;
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"RealtimeHeartJSONUpdated"
+                                                        object:self
+                                                      userInfo:json];
+}
+
+- (void)publishRealtimeSpO2JSON:(NSDictionary *)json {
+    if (![json isKindOfClass:[NSDictionary class]]) return;
+    self.latestSpO2JSON = json;
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"RealtimeSpO2JSONUpdated"
+                                                        object:self
+                                                      userInfo:json];
+}
+
+- (void)enableRealtimeCapture {
+    self.realtimeCaptureEnabled = YES;
+}
+
+// Stop real-time capture and stop the vitals cycle
+- (void)disableRealtimeCapture {
+    self.realtimeCaptureEnabled = NO;
+}
+
+static const NSUInteger kMaxRealtimeSamples = 3600; // ~1 hour @ 1 sample/sec (adjust as you like)
+
+- (void)appendRolling:(NSMutableArray<NSDictionary *> *)arr sample:(NSDictionary *)sample {
+    if (!sample) return;
+    @synchronized (arr) {
+        [arr addObject:sample];
+        if (arr.count > kMaxRealtimeSamples) {
+            // drop oldest samples
+            NSRange r = NSMakeRange(0, arr.count - kMaxRealtimeSamples);
+            [arr removeObjectsInRange:r];
+        }
+    }
+}
+
+#pragma mark - Session Liveness Watchdog (Whole-loop stall recovery)
+
+static const NSTimeInterval kSessionLivenessCheckEverySec = 60.0;
+// If we receive *nothing* (motion OR vitals) for this long => soft reset
+static const NSTimeInterval kSessionDeadAirThresholdSec  = 180.0; // 3 minutes
+
+- (void)startSessionLivenessWatchdog {
+    if (self.sessionWatchdogTimer) return;
+
+    dispatch_queue_t q = dispatch_get_global_queue(QOS_CLASS_UTILITY, 0);
+    self.sessionWatchdogTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
+
+    dispatch_source_set_timer(self.sessionWatchdogTimer,
+                              dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kSessionLivenessCheckEverySec * NSEC_PER_SEC)),
+                              (uint64_t)(kSessionLivenessCheckEverySec * NSEC_PER_SEC),
+                              (uint64_t)(2 * NSEC_PER_SEC));
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_source_set_event_handler(self.sessionWatchdogTimer, ^{
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+
+        // Only enforce when user intends the session to be running
+        if (!self.wantNightRunning) return;
+        if (!self.recordingActive) return;
+        if (!self.bleConnected) return;
+
+        // Avoid overlapping resets
+        if (self.sessionResetInProgress) return;
+
+        NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+
+        // If we haven't seen any packets yet, don't punish immediately.
+        // Give a short grace window after starting.
+        if (self.lastAnyPacketTs <= 0) return;
+
+        NSTimeInterval deadFor = now - self.lastAnyPacketTs;
+        if (deadFor > kSessionDeadAirThresholdSec) {
+            DLOG(@"[SESSION WATCHDOG] DEAD AIR for %.1fs (threshold %.1fs) -> soft reset loop",
+                 deadFor, kSessionDeadAirThresholdSec);
+
+            [self sessionSoftResetLoopWithReason:@"dead_air"];
+        }
+    });
+
+    dispatch_resume(self.sessionWatchdogTimer);
+    DLOG(@"[SESSION WATCHDOG] started (check=%.0fs threshold=%.0fs)",
+         kSessionLivenessCheckEverySec, kSessionDeadAirThresholdSec);
+}
+
+- (void)stopSessionLivenessWatchdog {
+    if (!self.sessionWatchdogTimer) return;
+    dispatch_source_cancel(self.sessionWatchdogTimer);
+    self.sessionWatchdogTimer = nil;
+    DLOG(@"[SESSION WATCHDOG] stopped");
+}
+
+- (void)sessionSoftResetLoopWithReason:(NSString *)reason {
+    if (self.sessionResetInProgress) return;
+    self.sessionResetInProgress = YES;
+
+    // Bump token so any scheduled phase steps self-cancel
+    self.nightToken += 1;
+
+    // Run reset on main to stay aligned with your dispatch_after scheduling
+    dispatch_async(dispatch_get_main_queue(), ^{
+        DLOG(@"[SESSION WATCHDOG] Soft reset begin reason=%@", reason ?: @"unknown");
+
+        // stop the scheduler loop
+        [self stopNightCycleTimer];
+
+        // ensure motion OFF
+        [self night_motion:NO];
+
+        
+
+        // reset packet timers so we don't instantly re-trigger
+        self.lastMotionPacketTs = 0;
+        self.lastVitalsPacketTs = 0;
+        self.lastAnyPacketTs = [[NSDate date] timeIntervalSince1970];
+
+        // 4) resync device state
+        [self syncData];
+
+        // 5) after a few seconds, restart the night loop
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            if (!self.wantNightRunning || !self.recordingActive || !self.bleConnected) {
+                DLOG(@"[SESSION WATCHDOG] Soft reset aborted (no longer running or disconnected)");
+                self.sessionResetInProgress = NO;
+                return;
+            }
+
+            DLOG(@"[SESSION WATCHDOG] Soft reset restart loop");
+            [self startNightCycleTimer];
+
+            // Release lock after loop restart
+            self.sessionResetInProgress = NO;
+        });
+    });
+}
+
+- (void)startVitalsWatchdog {
+    if (self.vitalsWatchdogTimer) return;
+
+    dispatch_queue_t q = dispatch_get_global_queue(QOS_CLASS_UTILITY, 0);
+    self.vitalsWatchdogTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
+
+    // Check every 30s
+    dispatch_source_set_timer(self.vitalsWatchdogTimer,
+                              dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC),
+                              30 * NSEC_PER_SEC,
+                              2 * NSEC_PER_SEC);
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_source_set_event_handler(self.vitalsWatchdogTimer, ^{
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+
+        // Only enforce during an active night session
+        if (!self.wantNightRunning) return;
+        if (!self.nightSessionRunning) return;
+        if (!self.bleConnected) return;
+
+        // Only enforce during vitals phases (SpO2 or HR)
+        if (self.nightPhase == NightPhaseMotion) return;
+
+        NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+        if (self.lastVitalsPacketTs <= 0) return;
+
+        // If nothing for 120s during a vitals phase,re-kick vitals streaming
+        if ((now - self.lastVitalsPacketTs) > 120.0) {
+            DLOG(@"[VITALS WATCHDOG] No HR/O2 packets for %.1fs -> re-kicking vitals ON",
+                 (now - self.lastVitalsPacketTs));
+
+            // do NOT stop vitals here.
+            // Just re-send the ON commands to "kick" the firmware.
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (!self.wantNightRunning) return;
+                if (!self.nightSessionRunning) return;
+                if (!self.bleConnected) return;
+                if (self.nightPhase == NightPhaseMotion) return;
+
+                if (self.nightPhase == NightPhaseSpO2) {
+                    [self night_spo2On];
+                } else if (self.nightPhase == NightPhaseHR) {
+                    [self night_hrOn];
+                }
+            });
+        }
+    });
+
+    dispatch_resume(self.vitalsWatchdogTimer);
+    DLOG(@"[VITALS WATCHDOG] started");
+}
+
+- (void)stopVitalsWatchdog {
+    if (!self.vitalsWatchdogTimer) return;
+    dispatch_source_cancel(self.vitalsWatchdogTimer);
+    self.vitalsWatchdogTimer = nil;
+    DLOG(@"[VITALS WATCHDOG] stopped");
+}
+#pragma mark - Sport Control
+
+- (void)stopSportMode {
+    YD_SyncSportCmd *stop = [[YD_SyncSportCmd alloc] init];
+    stop.status = SPORT_STATUS_STOP;
+    stop.type = 0;
+    stop.time = 0;
+    stop.distance = 0;
+
+    [[CEProductK6 shareInstance] sendCmdToDevice:stop
+                                       complete:^(NSError *error) {
+        if (error) {
+            DLOG(@"[SPORT] Stop failed: %@", error);
+        } else {
+            DLOG(@"[SPORT] Sport stopped — REAL_SPORT disabled");
+        }
+    }];
+}
+
+
+#pragma mark - Bluetooth Status
+
+// Handles BLE connection / disconnection life cycle
+
+- (void)bluetoothStatusChanged:(NSNotification *)noti {
+
+    NSInteger status = [noti.object intValue];
+
+    if (status == ProductStatus_completed) {
+        self.bleConnected = YES;
+        DLOG(@"[BLE] Connected");
+
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"BLE_CONNECTED_READY"
+                                                            object:nil];
+
+        [self stopSportMode];
+
+        if (self.wantNightRunning) {
+            DLOG(@"[BLE] Auto-resume night session after reconnect");
+
+            self.recordingActive = YES;
+            [self enableRealtimeCapture];
+
+            CE_HRControlCmd *hrControlOn =
+                [[CE_HRControlCmd alloc] initWithOnoff:1 type:HR_CONTROL_TYPE_HR];
+            [self bleSendCmd:hrControlOn label:@"HR_CONTROL ON (reconnect)"];
+
+            [self syncData];
+
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                if (!self.recordingActive) return;
+                [self startNightCycleTimer];
+            });
+        } else {
+            DLOG(@"[BLE] Connected idle (wantNightRunning=NO)");
+            [self startHeartbeat];
+        }
+        return;
+    }
+
+    if (status == ProductStatus_disconnected || status == ProductStatus_powerOff) {
+        self.bleConnected = NO;
+        DLOG(@"[BLE] Disconnected (segment %ld)", (long)self.motionSegmentId);
+
+        [self stopNightCycleTimer];
+        [self forceStopVitalsNow];
+        self.motionWindowActive = NO;
+        self.nightSessionRunning = NO;
+
+        [self stopHeartbeat];
+        [self stopMotionWatchdog];
+        [self stopVitalsWatchdog];
+        self.lastVitalsPacketTs = 0;
+        [self stopSessionLivenessWatchdog];
+        self.lastAnyPacketTs = 0;
+        self.sessionResetInProgress = NO;
+
+        self.recordingActive = NO;
+
+        [self flushMotionBatch];
+
+        self.motionSessionActive = NO;
+        self.motionSessionStartTs = 0;
+        self.lastFlushTs = 0;
+        self.motionSampleCounter = 0;
+        self.lastMotionPacketTs = 0;
+
+        self.motionSegmentId++;
+    }
+}
+- (void)syncData {
+    
+    // Performs hybrid device sync
+
+    CE_SyncHybridCmd *cmd = [[CE_SyncHybridCmd alloc] init];
+
+    CE_SensorCmd *sensorCmd = [[CE_SensorCmd alloc] init];
+    sensorCmd.onoff = 1;
+
+    CE_SyncPairOKCmd *pairOkCmd = [[CE_SyncPairOKCmd alloc] init];
+    pairOkCmd.firstPairStatus = 0;
+
+    cmd.infoItems = @[
+        [self userInfoCmd],
+        [self goalCmd],
+        [[YD_SyncLanguageCmd alloc] initWithLanguage:0],
+        [self timeCmd],
+        sensorCmd,
+        pairOkCmd
+    ];
+
+    DLOG(@"[SYNC] Sending hybrid sync");
+
+    [[CEProductK6 shareInstance] sendCmdToDevice:cmd
+                                       complete:^(NSError *error) {
+
+        if (error) {
+            DLOG(@"[SYNC] Error %@", error);
+            return;
+        }
+
+        DLOG(@"[SYNC] Completed");
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC),
+                       dispatch_get_main_queue(), ^{
+            
+            [self startHeartbeat];
+            
+            [self stopSportMode];
+            
+            if (self.recordingActive) {
+                // Do NOT start motion streaming here.
+                // Night cycle will call night_motion(YES) only during Motion phase.
+
+                self.motionSessionStartTs = [[NSDate date] timeIntervalSince1970];
+                self.motionSessionActive = YES;
+                self.lastFlushTs = 0;
+                self.motionSampleCounter = 0;
+
+                // lastMotionPacketTs should only advance when Motion phase is active
+                self.lastMotionPacketTs = 0;
+            } else {
+                self.motionSessionActive = NO;
+                self.motionSessionStartTs = 0;
+                self.lastMotionPacketTs = 0;
+            }
+
+        });
+    }];
+}
+
+#pragma mark - BLE Heartbeat
+
+// Starts periodic lightweight BLE command, attempts to prevent device sleep/disconnect
+
+- (void)startHeartbeat {
+    if (self.heartbeatTimer) return;
+
+    // Don’t heartbeat during night streaming; it collides with notifications/commands
+    if (self.wantNightRunning || self.nightSessionRunning || self.recordingActive) {
+        DLOG(@"[BLE] Heartbeat not started (streaming active)");
+        return;
+    }
+
+    self.heartbeatTimer =
+    [NSTimer scheduledTimerWithTimeInterval:60.0
+                                     target:self
+                                   selector:@selector(sendHeartbeat)
+                                   userInfo:nil
+                                    repeats:YES];
+
+    DLOG(@"[BLE] Heartbeat started (60s)");
+}
+
+- (void)sendHeartbeat {
+    // If you MUST ping, keep it rare and avoid “sensor on” spam during streaming.
+    if (self.wantNightRunning || self.nightSessionRunning || self.recordingActive) return;
+    if (!self.bleConnected) return;
+
+    // If your SDK has a true ping/keepalive cmd, use that instead.
+    // Otherwise, make this as harmless as possible.
+    CE_SensorCmd *ping = [[CE_SensorCmd alloc] init];
+    ping.onoff = 1;
+
+    [self bleSendCmd:ping label:@"Heartbeat SensorCmd(1)"];
+    DLOG(@"[BLE] Heartbeat ping sent");
+}
+    - (void)stopHeartbeat {
+        [self.heartbeatTimer invalidate];
+        self.heartbeatTimer = nil;
+        DLOG(@"[BLE] Heartbeat stopped");
+    }
+
+
+- (nullable NSString *)exportSpO2HistoryToJSON {
+    @synchronized (self.spo2HistoryJSON) {
+
+        NSDictionary *json = @{
+            @"type": @"spo2_history",
+            @"exportTime": [NSDate date].description,
+            @"count": @(self.spo2HistoryJSON.count),
+            @"samples": self.spo2HistoryJSON ?: @[]
+        };
+
+        NSError *err = nil;
+        NSData *data = [NSJSONSerialization dataWithJSONObject:json options:NSJSONWritingPrettyPrinted error:&err];
+        if (err || !data) return nil;
+        return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    }
+}
+
+- (nullable NSString *)exportHeartHistoryToJSON {
+    @synchronized (self.heartHistoryJSON) {
+        
+        NSDictionary *json = @{
+            @"type": @"heart_rate_history",
+            @"exportTime": [NSDate date].description,
+            @"count": @(self.heartHistoryJSON.count),
+            @"samples": self.heartHistoryJSON ?: @[]
+        };
+
+        NSError *err = nil;
+        NSData *data = [NSJSONSerialization dataWithJSONObject:json
+                                                       options:NSJSONWritingPrettyPrinted
+                                                         error:&err];
+        if (err || !data) return nil;
+        return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    }
+}
+
+- (nullable NSString *)exportAllRealtimeHistoryToJSON {
+    @synchronized (self) {
+        BOOL hasHR = self.heartHistoryJSON.count > 0;
+        BOOL hasO2 = self.spo2HistoryJSON.count > 0;
+        if (!hasHR && !hasO2) return nil;
+
+        NSDictionary *json = @{
+            @"type": @"realtime_history_bundle",
+            @"exportTime": [NSDate date].description,
+            @"heart_rate_count": @(self.heartHistoryJSON.count),
+            @"spo2_count": @(self.spo2HistoryJSON.count),
+            @"heart_rate_samples": self.heartHistoryJSON ?: @[],
+            @"spo2_samples": self.spo2HistoryJSON ?: @[]
+        };
+
+        NSError *err = nil;
+        NSData *data = [NSJSONSerialization dataWithJSONObject:json options:NSJSONWritingPrettyPrinted error:&err];
+        if (err || !data) return nil;
+        return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        
+        
+    }
+}
+#pragma mark - Command builders
+- (CE_SyncUserInfoCmd *)userInfoCmd {
+    CE_SyncUserInfoCmd *cmd = [[CE_SyncUserInfoCmd alloc] init];
+    cmd.userId = 0;
+    cmd.sex = 0;
+    cmd.age = 18;
+    cmd.height = 170;
+    cmd.weight = 60;
+    cmd.lrHand = 1;
+    return cmd;
+}
+
+- (CE_SyncGoalCmd *)goalCmd {
+    CE_SyncGoalCmd *cmd = [[CE_SyncGoalCmd alloc] init];
+    cmd.sleep = 480;
+    cmd.step = 2000;
+    cmd.distance = 5000;
+    cmd.calories = 1200;
+    cmd.sportTime = 30;
+    return cmd;
+}
+
+- (CE_SyncTimeCmd *)timeCmd {
+    CE_SyncTimeCmd *timeCmd = [[CE_SyncTimeCmd alloc] init];
+    timeCmd.absTime = [[NSDate date] timeIntervalSince1970];
+    timeCmd.offsetTime = (uint32_t)[NSTimeZone defaultTimeZone].secondsFromGMT;
+    timeCmd.format = 1;
+    timeCmd.mdFormat = 1;
+    return timeCmd;
+}
+
+// Generates anonymized device ID
+- (NSString *)hashedDeviceId {
+    NSString *raw = @"R7-smart-ring";
+
+    NSData *data = [raw dataUsingEncoding:NSUTF8StringEncoding];
+    uint8_t digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(data.bytes, (CC_LONG)data.length, digest);
+
+    NSMutableString *hash = [NSMutableString string];
+    for (int i = 0; i < 6; i++) { // truncate
+        [hash appendFormat:@"%02x", (unsigned int)digest[i]];
+    }
+
+    return [NSString stringWithFormat:@"R7-%@", hash];
+}
+
+@end
+
