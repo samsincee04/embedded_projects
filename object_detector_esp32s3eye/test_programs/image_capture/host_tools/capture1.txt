@@ -1,0 +1,147 @@
+Adding "flash"'s dependency "all" to list of commands with default set of options.
+Executing action: all (aliases: build)
+Running ninja in directory /Users/samsince04/project-1-visual-object-detectoion-samsincee04/test_programs/image_capture/embedded/build
+Executing "ninja all"...
+[1/4] cd /Users/samsince04/project-1-visual-object-detectoion-samsincee04/test_programs/image_capture/embedded/build && /Users/samsince04/.espressif/python_env/idf6.1_py3.14_env/bin/python /Users/samsince04/esp/esp-idf/components/partition_table/check_sizes.py --offset 0x8000 partition --type app /Users/samsince04/project-1-visual-object-detectoion-samsincee04/test_programs/image_capture/embedded/build/partition_table/partition-table.bin /Users/samsince04/project-1-visual-object-detectoion-samsincee04/test_programs/image_capture/embedded/build/image_capture.bin
+image_capture.bin binary size 0x42080 bytes. Smallest app partition is 0x100000 bytes. 0xbdf80 bytes (74%) free.
+[2/4] Performing build step for 'bootloader'
+[1/1] cd /Users/samsince04/project-1-visual-object-detectoion-samsincee04/test_programs/image_capture/embedded/build/bootloader && /Users/samsince04/.espressif/python_env/idf6.1_py3.14_env/bin/python /Users/samsince04/esp/esp-idf/components/partition_table/check_sizes.py --offset 0x8000 bootloader 0x0 /Users/samsince04/project-1-visual-object-detectoion-samsincee04/test_programs/image_capture/embedded/build/bootloader/bootloader.bin
+Bootloader binary size 0x5240 bytes. 0x2dc0 bytes (36%) free.
+[3/4] No install step for 'bootloader'
+[4/4] Completed 'bootloader'
+Executing action: flash
+Running ninja in directory /Users/samsince04/project-1-visual-object-detectoion-samsincee04/test_programs/image_capture/embedded/build
+Executing "ninja flash"...
+[1/5] cd /Users/samsince04/project-1-visual-object-detectoion-samsincee04/test_programs/image_capture/embedded/build && /Users/samsince04/.espressif/python_env/idf6.1_py3.14_env/bin/python /Users/samsince04/esp/esp-idf/components/partition_table/check_sizes.py --offset 0x8000 partition --type app /Users/samsince04/project-1-visual-object-detectoion-samsincee04/test_programs/image_capture/embedded/build/partition_table/partition-table.bin /Users/samsince04/project-1-visual-object-detectoion-samsincee04/test_programs/image_capture/embedded/build/image_capture.bin
+image_capture.bin binary size 0x42080 bytes. Smallest app partition is 0x100000 bytes. 0xbdf80 bytes (74%) free.
+[2/5] Performing build step for 'bootloader'
+[1/1] cd /Users/samsince04/project-1-visual-object-detectoion-samsincee04/test_programs/image_capture/embedded/build/bootloader && /Users/samsince04/.espressif/python_env/idf6.1_py3.14_env/bin/python /Users/samsince04/esp/esp-idf/components/partition_table/check_sizes.py --offset 0x8000 bootloader 0x0 /Users/samsince04/project-1-visual-object-detectoion-samsincee04/test_programs/image_capture/embedded/build/bootloader/bootloader.bin
+Bootloader binary size 0x5240 bytes. 0x2dc0 bytes (36%) free.
+[3/5] No install step for 'bootloader'
+[4/5] Completed 'bootloader'
+[4/5] Running utility command for flash
+esptool --chip esp32s3 -p /dev/cu.usbmodem101 -b 460800 --before=default-reset --after=hard-reset write-flash --flash-mode dio --flash-freq 80m --flash-size 2MB 0x0 bootloader/bootloader.bin 0x8000 partition_table/partition-table.bin 0x10000 image_capture.bin
+esptool v5.2.0
+Serial port /dev/cu.usbmodem101:
+Connecting...
+[1A[2K[1A[2KConnected to ESP32-S3 on /dev/cu.usbmodem101:
+Chip type:          ESP32-S3 (QFN56) (revision v0.2)
+Features:           Wi-Fi, BT 5 (LE), Dual Core + LP Core, 240MHz, Embedded PSRAM 8MB (AP_3v3)
+Crystal frequency:  40MHz
+USB mode:           USB-Serial/JTAG
+MAC:                dc:b4:d9:05:26:ac
+
+Uploading stub flasher...
+Running stub flasher...
+[1A[2K[1A[2KStub flasher running.
+Changing baud rate to 460800...
+Changed.
+
+Configuring flash size...
+SHA digest in image updated.
+Flash will be erased from 0x00000000 to 0x00005fff...
+Compressed 21056 bytes to 13555...
+[KWriting at 0x00000000 [                              ]   0.0% 0/13555 bytes... [KWriting at 0x00005240 [==============================] 100.0% 13555/13555 bytes... 
+[1A[2K[1A[2KWrote 21056 bytes (13555 compressed) at 0x00000000 in 0.3 seconds (671.0 kbit/s).
+Verifying written data...
+[1A[2KHash of data verified.
+Flash will be erased from 0x00008000 to 0x00008fff...
+Compressed 3072 bytes to 103...
+[KWriting at 0x00008000 [                              ]   0.0% 0/103 bytes... [KWriting at 0x00008c00 [==============================] 100.0% 103/103 bytes... 
+[1A[2K[1A[2KWrote 3072 bytes (103 compressed) at 0x00008000 in 0.0 seconds (585.2 kbit/s).
+Verifying written data...
+[1A[2KHash of data verified.
+Flash will be erased from 0x00010000 to 0x00052fff...
+Compressed 270464 bytes to 150149...
+[KWriting at 0x00010000 [                              ]   0.0% 0/150149 bytes... [KWriting at 0x0001b15b [==>                           ]  10.9% 16384/150149 bytes... [KWriting at 0x00023038 [=====>                        ]  21.8% 32768/150149 bytes... [KWriting at 0x0002912c [========>                     ]  32.7% 49152/150149 bytes... [KWriting at 0x0002fefc [============>                 ]  43.6% 65536/150149 bytes... [KWriting at 0x000375d2 [===============>              ]  54.6% 81920/150149 bytes... [KWriting at 0x0003d615 [==================>           ]  65.5% 98304/150149 bytes... [KWriting at 0x00043c15 [=====================>        ]  76.4% 114688/150149 bytes... [KWriting at 0x0004aa31 [=========================>    ]  87.3% 131072/150149 bytes... [KWriting at 0x00050b31 [============================> ]  98.2% 147456/150149 bytes... [KWriting at 0x00052080 [==============================] 100.0% 150149/150149 bytes... 
+[1A[2K[1A[2KWrote 270464 bytes (150149 compressed) at 0x00010000 in 1.5 seconds (1396.8 kbit/s).
+Verifying written data...
+[1A[2KHash of data verified.
+
+Hard resetting via RTS pin...
+Executing action: monitor
+Running idf_monitor in directory /Users/samsince04/project-1-visual-object-detectoion-samsincee04/test_programs/image_capture/embedded
+Executing "/Users/samsince04/.espressif/python_env/idf6.1_py3.14_env/bin/python /Users/samsince04/esp/esp-idf/tools/idf_monitor.py -p /dev/cu.usbmodem101 -b 115200 --toolchain-prefix xtensa-esp32s3-elf- --target esp32s3 --revision 0 /Users/samsince04/project-1-visual-object-detectoion-samsincee04/test_programs/image_capture/embedded/build/image_capture.elf /Users/samsince04/project-1-visual-object-detectoion-samsincee04/test_programs/image_capture/embedded/build/bootloader/bootloader.elf -m '/Users/samsince04/.espressif/python_env/idf6.1_py3.14_env/bin/python' '/Users/samsince04/esp/esp-idf/tools/idf.py' '-p' '/dev/cu.usbmodem101'"...
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0x15 (USB_UART_CHIP_RESET),boot:0x2a (SPI_FAST_FLASH_BOOT)
+Saved PC:0x40379586
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fce2820,len:0x14f0
+load:0x403c8700,len:0xda0
+load:0x403cb700,len:0x2f58
+entry 0x403c8908
+[0;32mI (24) boot: ESP-IDF v6.1-dev-2938-g12f36a021f 2nd stage bootloader[0m
+[0;32mI (25) boot: compile time Mar 17 2026 20:03:14[0m
+[0;32mI (25) boot: Multicore bootloader[0m
+[0;32mI (26) boot: chip revision: v0.2[0m
+[0;32mI (29) boot: efuse block revision: v1.3[0m
+[0;32mI (33) boot.esp32s3: Boot SPI Speed : 80MHz[0m
+[0;32mI (37) boot.esp32s3: SPI Mode       : DIO[0m
+[0;32mI (40) boot.esp32s3: SPI Flash Size : 2MB[0m
+[0;32mI (44) boot: Enabling RNG early entropy source...[0m
+[0;32mI (49) boot: Partition Table:[0m
+[0;32mI (51) boot: ## Label            Usage          Type ST Offset   Length[0m
+[0;32mI (58) boot:  0 nvs              WiFi data        01 02 00009000 00006000[0m
+[0;32mI (64) boot:  1 phy_init         RF data          01 01 0000f000 00001000[0m
+[0;32mI (71) boot:  2 factory          factory app      00 00 00010000 00100000[0m
+[0;32mI (77) boot: End of partition table[0m
+[0;32mI (81) esp_image: segment 0: paddr=00010020 vaddr=3c030020 size=0d924h ( 55588) map[0m
+[0;32mI (98) esp_image: segment 1: paddr=0001d94c vaddr=3fc90d00 size=026cch (  9932) load[0m
+[0;32mI (100) esp_image: segment 2: paddr=00020020 vaddr=42000020 size=223d8h (140248) map[0m
+[0;32mI (128) esp_image: segment 3: paddr=00042400 vaddr=3fc933cc size=02f40h ( 12096) load[0m
+[0;32mI (131) esp_image: segment 4: paddr=00045348 vaddr=40374000 size=0cce0h ( 52448) load[0m
+[0;32mI (143) esp_image: segment 5: paddr=00052030 vaddr=50000000 size=00024h (    36) load[0m
+[0;32mI (150) boot: Loaded app from partition at offset 0x10000[0m
+[0;32mI (150) boot: Disabling RNG early entropy source...[0m
+[0;32mI (161) cpu_start: Multicore app[0m
+[0;32mI (170) cpu_start: GPIO 44 and 43 are used as console UART I/O pins[0m
+[0;32mI (170) cpu_start: Pro cpu start user code[0m
+[0;32mI (170) cpu_start: cpu freq: 160000000 Hz[0m
+[0;32mI (172) app_init: Application information:[0m
+[0;32mI (176) app_init: Project name:     image_capture[0m
+[0;32mI (180) app_init: App version:      dde14de[0m
+[0;32mI (184) app_init: Compile time:     Mar 17 2026 20:03:07[0m
+[0;32mI (189) app_init: ELF file SHA256:  5fab3905d...[0m
+[0;32mI (193) app_init: ESP-IDF:          v6.1-dev-2938-g12f36a021f[0m
+[0;32mI (199) efuse_init: Min chip rev:     v0.0[0m
+[0;32mI (203) efuse_init: Max chip rev:     v0.99 [0m
+[0;32mI (207) efuse_init: Chip rev:         v0.2[0m
+[0;32mI (211) heap_init: Initializing. RAM available for dynamic allocation:[0m
+[0;32mI (217) heap_init: At 3FC97570 len 000521A0 (328 KiB): RAM[0m
+[0;32mI (222) heap_init: At 3FCE9710 len 00005724 (21 KiB): RAM[0m
+[0;32mI (227) heap_init: At 3FCF0000 len 00008000 (32 KiB): DRAM[0m
+[0;32mI (232) heap_init: At 600FE000 len 00001FE8 (7 KiB): RTCRAM[0m
+[0;32mI (239) spi_flash: detected chip: generic[0m
+[0;32mI (241) spi_flash: flash io: dio[0m
+[0;33mW (244) spi_flash: Detected size(8192k) larger than the size in the binary image header(2048k). Using the size in the binary image header.[0m
+[0;32mI (257) sleep_gpio: Configure to isolate all GPIO pins in sleep state[0m
+[0;32mI (263) sleep_gpio: Enable automatic switching of GPIO sleep configuration[0m
+[0;32mI (270) main_task: Started on CPU0[0m
+[0;32mI (280) main_task: Calling app_main()[0m
+[0;32mI (280) s3 ll_cam: DMA Channel=0[0m
+[0;32mI (280) cam_hal: cam init ok[0m
+[0;32mI (280) sccb-ng: pin_sda 4 pin_scl 5[0m
+[0;32mI (280) sccb-ng: sccb_i2c_port=1[0m
+[0;32mI (300) camera: Camera PID=0x3660 VER=0x00 MIDL=0x00 MIDH=0x00[0m
+[0;32mI (300) camera: Detected OV3660 camera[0m
+[0;32mI (300) camera: Detected camera at address=0x3c[0m
+[0;32mI (600) cam_hal: PSRAM DMA mode disabled[0m
+[0;32mI (600) cam_hal: buffer_size: 16384, half_buffer_size: 1024, node_buffer_size: 1024, node_cnt: 16, total_cnt: 3[0m
+[0;32mI (600) cam_hal: Allocating 3840 Byte frame buffer in OnBoard RAM[0m
+[0;32mI (600) cam_hal: cam config ok[0m
+[0;32mI (620) ov3660: Calculated VCO: 100000000 Hz, PLLCLK: 100000000 Hz, SYSCLK: 25000000 Hz, PCLK: 5000000 Hz[0m
+[0;32mI (640) cam: Camera ready. Sending frame in 2s...[0m
+cam_hal: NO-SOI - JPEG start marker missing
+cam_hal: NO-SOI - JPEG start marker missing
+cam_hal: FB-OVF
+cam_hal: FB-OVF
+IMG_START 2356
+255,216,255,224,0,16,74,70,73,70,0,1,1,1,0,0,0,0,0,0,255,219,0,67,0,12,8,9,11,9,8,12,11,10,11,14,13,12,14,18,30,20,18,17,17,18,37,26,28,22,30,44,38,46,45,43,38,42,41,48,54,69,59,48,51,65,52,41,42,60,82,61,65,71,74,77,78,77,47,58,85,91,84,75,90,69,76,77,74,255,219,0,67,1,13,14,14,18,16,18,35,20,20,35,74,50,42,50,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,74,255,196,0,31,0,0,1,5,1,1,1,1,1,1,0,0,0,0,0,0,0,0,1,2,3,4,5,6,7,8,9,10,11,255,196,0,181,16,0,2,1,3,3,2,4,3,5,5,4,4,0,0,1,125,1,2,3,0,4,17,5,18,33,49,65,6,19,81,97,7,34,113,20,50,129,145,161,8,35,66,177,193,21,82,209,240,36,51,98,114,130,9,10,22,23,24,25,26,37,38,39,40,41,42,52,53,54,55,56,57,58,67,68,69,70,71,72,73,74,83,84,85,86,87,88,89,90,99,100,101,102,103,104,105,106,115,116,117,118,119,120,121,122,131,132,133,134,135,136,137,138,146,147,148,149,150,151,152,153,154,162,163,164,165,166,167,168,169,170,178,179,180,181,182,183,184,185,186,194,195,196,197,198,199,200,201,202,210,211,212,213,214,215,216,217,218,225,226,227,228,229,230,231,232,233,234,241,242,243,244,245,246,247,248,249,250,255,196,0,31,1,0,3,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,1,2,3,4,5,6,7,8,9,10,11,255,196,0,181,17,0,2,1,2,4,4,3,4,7,5,4,4,0,1,2,119,0,1,2,3,17,4,5,33,49,6,18,65,81,7,97,113,19,34,50,129,8,20,66,145,161,177,193,9,35,51,82,240,21,98,114,209,10,22,36,52,225,37,241,23,24,25,26,38,39,40,41,42,53,54,55,56,57,58,67,68,69,70,71,72,73,74,83,84,85,86,87,88,89,90,99,100,101,102,103,104,105,106,115,116,117,118,119,120,121,122,130,131,132,133,134,135,136,137,138,146,147,148,149,150,151,152,153,154,162,163,164,165,166,167,168,169,170,178,179,180,181,182,183,184,185,186,194,195,196,197,198,199,200,201,202,210,211,212,213,214,215,216,217,218,226,227,228,229,230,231,232,233,234,242,243,244,245,246,247,248,249,250,255,192,0,17,8,0,120,0,160,3,1,33,0,2,17,1,3,17,1,255,218,0,12,3,1,0,2,17,3,17,0,63,0,224,46,84,72,155,155,229,127,95,90,130,43,97,44,121,15,205,96,158,134,100,41,242,190,211,83,129,74,69,18,172,102,146,66,177,117,63,133,70,224,49,111,49,252,53,98,61,64,15,225,53,92,128,88,91,180,63,56,233,222,131,123,15,247,168,176,16,201,124,27,136,212,147,85,162,38,105,79,158,120,29,170,173,97,17,92,198,34,127,148,252,167,165,65,86,134,20,148,192,74,41,128,81,64,26,15,189,93,147,239,85,108,50,140,173,100,137,34,165,10,196,214,133,18,167,152,189,27,63,74,10,103,239,147,184,212,136,122,198,0,206,221,245,39,250,145,187,30,194,166,224,55,204,140,131,198,13,88,183,154,16,158,92,138,62,180,1,94,229,144,73,251,145,140,119,21,22,214,115,150,170,1,167,104,226,153,76,98,81,76,4,164,166,1,69,0,107,60,170,94,57,61,122,212,109,22,215,96,62,162,176,36,174,210,40,249,66,227,235,81,151,24,56,28,154,210,195,16,35,154,148,91,250,181,39,33,150,105,216,200,195,86,0,57,81,7,240,138,108,176,166,55,4,231,210,169,48,42,238,254,234,83,62,98,50,199,138,216,65,242,14,148,217,21,135,204,87,0,208,4,116,85,12,74,74,96,20,80,6,207,151,108,27,110,13,78,208,65,235,207,214,185,201,41,205,102,14,231,67,154,166,209,225,163,247,171,76,100,180,225,80,50,65,79,21,0,58,159,64,202,243,35,127,203,53,168,126,207,140,121,173,143,165,106,153,34,121,137,26,252,139,215,248,187,211,95,116,140,71,92,242,42,128,130,146,172,98,82,83,0,165,160,13,27,123,175,152,9,57,247,164,188,220,37,221,216,214,34,36,182,184,220,12,111,223,161,170,242,36,155,130,109,249,150,128,20,35,227,230,28,210,130,187,182,231,154,144,28,38,140,54,51,83,84,181,97,141,151,121,80,16,227,154,148,14,40,232,0,220,169,170,76,146,111,251,167,208,138,184,128,121,75,30,224,237,199,167,122,12,155,70,7,200,63,90,189,196,64,195,191,173,48,213,12,109,21,64,20,180,132,75,181,129,198,43,86,56,247,219,40,145,107,38,4,95,217,204,27,134,226,173,203,10,63,87,0,250,212,220,12,219,213,49,5,10,249,30,181,12,14,88,237,60,228,113,87,208,8,58,86,140,121,216,185,244,165,80,100,130,156,13,98,49,36,98,184,195,108,200,235,85,222,92,143,245,142,107,84,73,88,183,31,47,29,169,224,109,136,29,161,152,250,214,128,53,240,71,63,41,29,170,44,80,49,180,149,64,20,180,8,215,146,242,17,209,115,77,91,169,165,31,186,94,5,99,97,17,197,36,147,75,177,220,173,43,198,32,184,95,48,238,90,99,22,79,179,135,35,170,55,233,80,71,28,113,124,230,79,166,40,0,105,20,252,203,22,236,127,17,167,196,229,211,115,82,146,208,9,115,67,200,17,119,26,204,101,69,221,52,152,39,173,57,213,7,49,146,71,189,110,33,210,195,242,7,81,242,154,143,148,147,215,235,72,66,58,158,61,41,239,109,34,174,237,132,143,106,46,50,177,52,218,177,139,138,81,64,26,178,249,15,111,218,160,181,119,135,183,21,145,33,229,52,243,101,88,3,81,220,163,163,124,237,147,76,7,219,90,201,63,78,149,99,236,19,68,114,20,61,43,129,66,65,36,89,67,192,52,90,253,226,42,222,195,44,159,151,248,88,213,102,149,156,159,74,136,160,29,19,15,55,147,203,10,123,62,2,137,23,167,24,245,170,3,70,68,255,0,67,199,247,69,83,93,140,128,119,28,212,8,179,60,33,118,28,127,5,77,7,250,177,72,98,73,111,20,191,125,1,170,205,166,70,126,235,17,77,74,195,36,142,198,53,31,55,205,83,164,73,31,220,80,41,92,12,155,120,142,119,176,249,106,193,88,91,150,127,194,168,145,175,116,145,113,18,213,100,204,243,12,247,166,7,65,18,8,208,1,79,146,77,145,150,244,172,192,165,21,186,220,91,23,148,100,158,149,86,226,47,179,162,199,31,86,234,213,64,87,111,50,33,189,101,222,59,212,114,40,105,240,63,138,172,98,180,106,84,249,109,187,29,115,69,178,102,112,191,120,83,3,94,79,245,109,244,172,187,127,154,125,171,244,168,64,107,223,127,171,31,149,71,16,219,16,127,124,84,1,45,20,134,20,83,3,50,218,108,69,143,74,118,99,83,230,227,131,84,73,86,234,81,43,229,70,42,93,53,115,113,244,171,232,6,222,106,185,62,97,100,110,134,178,2,89,15,148,35,199,65,81,94,180,109,156,140,145,212,80,5,11,136,86,20,125,185,195,85,88,122,179,119,11,90,129,28,109,177,193,173,11,40,177,51,158,195,165,18,25,53,236,158,92,7,29,79,21,6,151,31,89,79,208,84,244,2,123,249,190,226,10,187,34,109,178,81,233,80,192,174,141,138,150,144,194,138,0,194,137,246,53,91,117,197,169,173,89,37,56,151,115,129,90,26,98,124,238,69,12,13,28,213,89,78,249,80,33,232,121,168,2,107,192,77,185,199,90,165,9,105,157,100,110,159,118,128,47,221,109,143,239,15,145,184,53,146,2,43,228,125,222,134,154,2,187,198,85,136,173,91,1,251,175,194,169,140,165,118,254,115,127,178,9,171,17,73,229,219,175,247,143,65,72,8,35,83,37,202,230,180,229,127,54,104,225,95,198,165,129,13,61,27,181,72,201,40,160,14,122,164,50,49,77,157,171,98,66,36,118,63,32,171,250,89,195,50,158,180,152,22,46,33,115,48,112,223,40,162,4,77,230,69,61,106,0,154,127,245,45,244,170,67,49,52,3,29,58,208,6,164,224,73,110,217,244,172,212,139,112,84,143,171,173,36,2,93,69,188,2,6,31,161,168,237,230,48,117,29,58,138,160,43,158,80,143,122,123,219,30,62,99,210,170,224,44,110,232,167,187,251,85,235,4,49,6,154,67,243,154,150,49,41,42,6,74,141,154,125,0,97,60,14,139,146,56,166,86,228,150,45,38,242,164,246,53,120,160,243,150,88,255,0,26,134,5,201,255,0,213,26,130,209,54,66,42,64,62,208,158,111,150,212,249,19,228,118,246,160,4,150,83,246,1,142,167,138,45,173,136,195,247,74,64,45,236,103,206,249,127,140,126,181,86,62,88,172,163,181,48,20,67,177,142,6,113,222,143,54,54,239,64,200,190,233,32,13,217,57,199,173,36,146,76,237,229,184,192,30,148,192,176,135,42,41,213,3,19,165,74,14,234,0,174,243,70,214,245,149,90,196,128,171,214,238,99,100,193,202,154,24,205,41,240,241,237,61,232,138,63,46,48,181,152,20,174,252,169,51,206,28,84,214,78,102,182,193,170,2,27,185,68,75,28,99,248,107,66,7,38,211,122,245,235,73,128,211,47,157,107,230,142,168,106,163,159,244,48,223,197,154,67,37,183,186,73,55,238,33,79,21,29,204,49,25,58,140,211,2,72,124,164,31,166,105,240,141,150,142,248,249,215,138,64,66,185,218,51,69,33,133,0,224,208,6,109,204,101,37,219,73,37,187,198,185,34,181,185,4,53,34,72,85,151,208,85,12,210,150,112,222,81,30,181,123,248,107,32,49,100,137,167,184,147,103,106,211,181,139,200,131,21,76,12,137,9,121,219,235,91,186,111,252,122,168,52,165,176,198,194,190,85,204,144,159,187,39,74,140,237,8,232,71,29,27,218,164,12,211,15,239,118,169,222,79,74,145,33,184,223,243,38,127,26,171,129,100,71,62,197,24,78,41,209,51,170,50,176,231,161,169,2,37,147,157,172,49,82,82,24,82,82,17,255,217
+IMG_END
+[0;32mI (3330) cam: Done. Reset to capture again.[0m
+[0;32mI (3330) main_task: Returned from app_main()[0m
+cam_hal: FB-OVF
+cam_hal: FB-OVF
+Done

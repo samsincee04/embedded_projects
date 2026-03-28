@@ -1,0 +1,9 @@
+Day 1 checkpoint complete.
+
+I know exactly what my final model is supposed to classify/detect, and my repo is organized for final development.
+
+Final direction:
+- embedded visual shoe vs no_shoe detector/classifier
+- training/ will hold final model development
+- embedded/ will hold final deployment code
+- test_programs/ preserves HW3 milestone evidence

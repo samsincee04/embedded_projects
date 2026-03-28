@@ -1,0 +1,206 @@
+Adding "flash"'s dependency "all" to list of commands with default set of options.
+Executing action: all (aliases: build)
+Running ninja in directory /Users/samsince04/project-1-visual-object-detectoion-samsincee04/test_programs/esp_test/embedded/build
+Executing "ninja all"...
+[1/4] cd /Users/samsince04/project-1-visual-object-detectoion-samsincee04/test_programs/esp_test/embedded/build && /Users/samsince04/.espressif/python_env/idf6.1_py3.14_env/bin/python /Users/samsince04/esp/esp-idf/components/partition_table/check_sizes.py --offset 0x8000 partition --type app /Users/samsince04/project-1-visual-object-detectoion-samsincee04/test_programs/esp_test/embedded/build/partition_table/partition-table.bin /Users/samsince04/project-1-visual-object-detectoion-samsincee04/test_programs/esp_test/embedded/build/esp_test.bin
+esp_test.bin binary size 0x6cd10 bytes. Smallest app partition is 0x100000 bytes. 0x932f0 bytes (57%) free.
+[2/4] Performing build step for 'bootloader'
+[1/1] cd /Users/samsince04/project-1-visual-object-detectoion-samsincee04/test_programs/esp_test/embedded/build/bootloader && /Users/samsince04/.espressif/python_env/idf6.1_py3.14_env/bin/python /Users/samsince04/esp/esp-idf/components/partition_table/check_sizes.py --offset 0x8000 bootloader 0x0 /Users/samsince04/project-1-visual-object-detectoion-samsincee04/test_programs/esp_test/embedded/build/bootloader/bootloader.bin
+Bootloader binary size 0x5240 bytes. 0x2dc0 bytes (36%) free.
+[3/4] No install step for 'bootloader'
+[4/4] Completed 'bootloader'
+Executing action: flash
+Running ninja in directory /Users/samsince04/project-1-visual-object-detectoion-samsincee04/test_programs/esp_test/embedded/build
+Executing "ninja flash"...
+[1/5] cd /Users/samsince04/project-1-visual-object-detectoion-samsincee04/test_programs/esp_test/embedded/build && /Users/samsince04/.espressif/python_env/idf6.1_py3.14_env/bin/python /Users/samsince04/esp/esp-idf/components/partition_table/check_sizes.py --offset 0x8000 partition --type app /Users/samsince04/project-1-visual-object-detectoion-samsincee04/test_programs/esp_test/embedded/build/partition_table/partition-table.bin /Users/samsince04/project-1-visual-object-detectoion-samsincee04/test_programs/esp_test/embedded/build/esp_test.bin
+esp_test.bin binary size 0x6cd10 bytes. Smallest app partition is 0x100000 bytes. 0x932f0 bytes (57%) free.
+[2/5] Performing build step for 'bootloader'
+[1/1] cd /Users/samsince04/project-1-visual-object-detectoion-samsincee04/test_programs/esp_test/embedded/build/bootloader && /Users/samsince04/.espressif/python_env/idf6.1_py3.14_env/bin/python /Users/samsince04/esp/esp-idf/components/partition_table/check_sizes.py --offset 0x8000 bootloader 0x0 /Users/samsince04/project-1-visual-object-detectoion-samsincee04/test_programs/esp_test/embedded/build/bootloader/bootloader.bin
+Bootloader binary size 0x5240 bytes. 0x2dc0 bytes (36%) free.
+[3/5] No install step for 'bootloader'
+[4/5] Completed 'bootloader'
+[4/5] Running utility command for flash
+esptool --chip esp32s3 -p /dev/cu.usbmodem101 -b 460800 --before=default-reset --after=hard-reset write-flash --flash-mode dio --flash-freq 80m --flash-size 2MB 0x0 bootloader/bootloader.bin 0x8000 partition_table/partition-table.bin 0x10000 esp_test.bin
+esptool v5.2.0
+Serial port /dev/cu.usbmodem101:
+Connecting...
+[1A[2K[1A[2KConnected to ESP32-S3 on /dev/cu.usbmodem101:
+Chip type:          ESP32-S3 (QFN56) (revision v0.2)
+Features:           Wi-Fi, BT 5 (LE), Dual Core + LP Core, 240MHz, Embedded PSRAM 8MB (AP_3v3)
+Crystal frequency:  40MHz
+USB mode:           USB-Serial/JTAG
+MAC:                dc:b4:d9:05:26:ac
+
+Uploading stub flasher...
+Running stub flasher...
+[1A[2K[1A[2KStub flasher running.
+Changing baud rate to 460800...
+Changed.
+
+Configuring flash size...
+SHA digest in image updated.
+Flash will be erased from 0x00000000 to 0x00005fff...
+Compressed 21056 bytes to 13554...
+
+[KWriting at 0x00000000 [                              ]   0.0% 0/13554 bytes... 
+[KWriting at 0x00005240 [==============================] 100.0% 13554/13554 bytes... 
+[1A[2K[1A[2KWrote 21056 bytes (13554 compressed) at 0x00000000 in 0.3 seconds (670.9 kbit/s).
+Verifying written data...
+[1A[2KHash of data verified.
+Flash will be erased from 0x00008000 to 0x00008fff...
+Compressed 3072 bytes to 103...
+
+[KWriting at 0x00008000 [                              ]   0.0% 0/103 bytes... 
+[KWriting at 0x00008c00 [==============================] 100.0% 103/103 bytes... 
+[1A[2K[1A[2KWrote 3072 bytes (103 compressed) at 0x00008000 in 0.0 seconds (586.0 kbit/s).
+Verifying written data...
+[1A[2KHash of data verified.
+Flash will be erased from 0x00010000 to 0x0007cfff...
+Compressed 445712 bytes to 311979...
+
+[KWriting at 0x00010000 [                              ]   0.0% 0/311979 bytes... 
+[KWriting at 0x0001bd9b [>                             ]   5.3% 16384/311979 bytes... 
+[KWriting at 0x00020087 [==>                           ]  10.5% 32768/311979 bytes... 
+[KWriting at 0x000246a9 [===>                          ]  15.8% 49152/311979 bytes... 
+[KWriting at 0x00028c60 [=====>                        ]  21.0% 65536/311979 bytes... 
+[KWriting at 0x0002d281 [======>                       ]  26.3% 81920/311979 bytes... 
+[KWriting at 0x0003183c [========>                     ]  31.5% 98304/311979 bytes... 
+[KWriting at 0x00035dff [==========>                   ]  36.8% 114688/311979 bytes... 
+[KWriting at 0x0003bef5 [===========>                  ]  42.0% 131072/311979 bytes... 
+[KWriting at 0x00043f6e [=============>                ]  47.3% 147456/311979 bytes... 
+[KWriting at 0x0004a244 [==============>               ]  52.5% 163840/311979 bytes... 
+[KWriting at 0x0004f6f4 [================>             ]  57.8% 180224/311979 bytes... 
+[KWriting at 0x00054bac [=================>            ]  63.0% 196608/311979 bytes... 
+[KWriting at 0x00059eb6 [===================>          ]  68.3% 212992/311979 bytes... 
+[KWriting at 0x0005f56c [=====================>        ]  73.5% 229376/311979 bytes... 
+[KWriting at 0x00064933 [======================>       ]  78.8% 245760/311979 bytes... 
+[KWriting at 0x00069e87 [========================>     ]  84.0% 262144/311979 bytes... 
+[KWriting at 0x0006fb46 [=========================>    ]  89.3% 278528/311979 bytes... 
+[KWriting at 0x000763ca [===========================>  ]  94.5% 294912/311979 bytes... 
+[KWriting at 0x0007c9a2 [============================> ]  99.8% 311296/311979 bytes... 
+[KWriting at 0x0007cd10 [==============================] 100.0% 311979/311979 bytes... 
+[1A[2K[1A[2KWrote 445712 bytes (311979 compressed) at 0x00010000 in 2.9 seconds (1243.3 kbit/s).
+Verifying written data...
+[1A[2KHash of data verified.
+
+Hard resetting via RTS pin...
+Executing action: monitor
+Running idf_monitor in directory /Users/samsince04/project-1-visual-object-detectoion-samsincee04/test_programs/esp_test/embedded
+Executing "/Users/samsince04/.espressif/python_env/idf6.1_py3.14_env/bin/python /Users/samsince04/esp/esp-idf/tools/idf_monitor.py -p /dev/cu.usbmodem101 -b 115200 --toolchain-prefix xtensa-esp32s3-elf- --target esp32s3 --revision 0 /Users/samsince04/project-1-visual-object-detectoion-samsincee04/test_programs/esp_test/embedded/build/esp_test.elf /Users/samsince04/project-1-visual-object-detectoion-samsincee04/test_programs/esp_test/embedded/build/bootloader/bootloader.elf -m '/Users/samsince04/.espressif/python_env/idf6.1_py3.14_env/bin/python' '/Users/samsince04/esp/esp-idf/tools/idf.py' '-p' '/dev/cu.usbmodem101'"...
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0x15 (USB_UART_CHIP_RESET),boot:0x2a (SPI_FAST_FLASH_BOOT)
+Saved PC:0x42025e7c
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fce2820,len:0x14f0
+load:0x403c8700,len:0xda0
+load:0x403cb700,len:0x2f58
+entry 0x403c8908
+[0;32mI (24) boot: ESP-IDF v6.1-dev-2938-g12f36a021f 2nd stage bootloader[0m
+[0;32mI (25) boot: compile time Mar 17 2026 21:24:43[0m
+[0;32mI (25) boot: Multicore bootloader[0m
+[0;32mI (26) boot: chip revision: v0.2[0m
+[0;32mI (29) boot: efuse block revision: v1.3[0m
+[0;32mI (33) boot.esp32s3: Boot SPI Speed : 80MHz[0m
+[0;32mI (37) boot.esp32s3: SPI Mode       : DIO[0m
+[0;32mI (40) boot.esp32s3: SPI Flash Size : 2MB[0m
+[0;32mI (44) boot: Enabling RNG early entropy source...[0m
+[0;32mI (49) boot: Partition Table:[0m
+[0;32mI (51) boot: ## Label            Usage          Type ST Offset   Length[0m
+[0;32mI (58) boot:  0 nvs              WiFi data        01 02 00009000 00006000[0m
+[0;32mI (64) boot:  1 phy_init         RF data          01 01 0000f000 00001000[0m
+[0;32mI (71) boot:  2 factory          factory app      00 00 00010000 00100000[0m
+[0;32mI (77) boot: End of partition table[0m
+[0;32mI (81) esp_image: segment 0: paddr=00010020 vaddr=3c040020 size=2dba4h (187300) map[0m
+[0;32mI (121) esp_image: segment 1: paddr=0003dbcc vaddr=3fc90000 size=0244ch (  9292) load[0m
+[0;32mI (124) esp_image: segment 2: paddr=00040020 vaddr=42000020 size=300f0h (196848) map[0m
+[0;32mI (161) esp_image: segment 3: paddr=00070118 vaddr=3fc9244c size=00c80h (  3200) load[0m
+[0;32mI (162) esp_image: segment 4: paddr=00070da0 vaddr=40374000 size=0bf14h ( 48916) load[0m
+[0;32mI (175) esp_image: segment 5: paddr=0007ccbc vaddr=50000000 size=00024h (    36) load[0m
+[0;32mI (181) boot: Loaded app from partition at offset 0x10000[0m
+[0;32mI (181) boot: Disabling RNG early entropy source...[0m
+[0;32mI (194) cpu_start: Multicore app[0m
+[0;32mI (203) cpu_start: GPIO 44 and 43 are used as console UART I/O pins[0m
+[0;32mI (204) cpu_start: Pro cpu start user code[0m
+[0;32mI (204) cpu_start: cpu freq: 160000000 Hz[0m
+[0;32mI (205) app_init: Application information:[0m
+[0;32mI (209) app_init: Project name:     esp_test[0m
+[0;32mI (213) app_init: App version:      9fdfddf[0m
+[0;32mI (217) app_init: Compile time:     Mar 17 2026 21:23:13[0m
+[0;32mI (222) app_init: ELF file SHA256:  391e450ec...[0m
+[0;32mI (226) app_init: ESP-IDF:          v6.1-dev-2938-g12f36a021f[0m
+[0;32mI (232) efuse_init: Min chip rev:     v0.0[0m
+[0;32mI (235) efuse_init: Max chip rev:     v0.99 [0m
+[0;32mI (239) efuse_init: Chip rev:         v0.2[0m
+[0;32mI (243) heap_init: Initializing. RAM available for dynamic allocation:[0m
+[0;32mI (250) heap_init: At 3FCC5F30 len 000237E0 (141 KiB): RAM[0m
+[0;32mI (255) heap_init: At 3FCE9710 len 00005724 (21 KiB): RAM[0m
+[0;32mI (260) heap_init: At 3FCF0000 len 00008000 (32 KiB): DRAM[0m
+[0;32mI (265) heap_init: At 600FE000 len 00001FE8 (7 KiB): RTCRAM[0m
+[0;32mI (271) spi_flash: detected chip: generic[0m
+[0;32mI (274) spi_flash: flash io: dio[0m
+[0;33mW (277) spi_flash: Detected size(8192k) larger than the size in the binary image header(2048k). Using the size in the binary image header.[0m
+[0;32mI (290) sleep_gpio: Configure to isolate all GPIO pins in sleep state[0m
+[0;32mI (296) sleep_gpio: Enable automatic switching of GPIO sleep configuration[0m
+[0;32mI (303) main_task: Started on CPU0[0m
+[0;32mI (313) main_task: Calling app_main()[0m
+[0;32mI (313) tflite_cifar: Input shape:  [1, 32, 32, 3][0m
+[0;32mI (323) tflite_cifar: Output shape: [1, 10][0m
+[0;32mI (323) tflite_cifar: TFLite Micro ready. Starting inference loop...[0m
+
+
+--- Iteration 1 ---
+Input: automobile (true label=1)
+Predicted: truck (9)
+Correct: NO
+Inference time: 74999 us (75.00 ms)
+
+--- Iteration 2 ---
+Input: horse (true label=7)
+Predicted: horse (7)
+Correct: YES
+Inference time: 74815 us (74.82 ms)
+
+--- Iteration 3 ---
+Input: automobile (true label=1)
+Predicted: truck (9)
+Correct: NO
+Inference time: 74904 us (74.90 ms)
+
+--- Iteration 4 ---
+Input: horse (true label=7)
+Predicted: horse (7)
+Correct: YES
+Inference time: 74832 us (74.83 ms)
+
+--- Iteration 5 ---
+Input: automobile (true label=1)
+Predicted: truck (9)
+Correct: NO
+Inference time: 74906 us (74.91 ms)
+
+--- Iteration 6 ---
+Input: horse (true label=7)
+Predicted: horse (7)
+Correct: YES
+Inference time: 74831 us (74.83 ms)
+
+--- Iteration 7 ---
+Input: automobile (true label=1)
+Predicted: truck (9)
+Correct: NO
+Inference time: 74904 us (74.90 ms)
+
+--- Iteration 8 ---
+Input: horse (true label=7)
+Predicted: horse (7)
+Correct: YES
+Inference time: 74833 us (74.83 ms)
+
+--- Iteration 9 ---
+Input: automobile (true label=1)
+Predicted: truck (9)
+Correct: NO
+Inference time: 74904 us (74.90 ms)
+Done
