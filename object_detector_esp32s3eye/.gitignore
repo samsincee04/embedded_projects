@@ -8,10 +8,13 @@ venv/
 build/
 sdkconfig.old
 *.log
-training/dataset/raw/
-training/dataset/processed/
+
+training/dataset/
+training/notes/
 training/project1_model.h5
 training/project1_model.tflite
 training/project1_model_int8.tflite
+
+test_programs/
 embedded/managed_components/
 embedded/components/esp-tflite-micro/

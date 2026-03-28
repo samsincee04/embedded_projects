@@ -1,7 +1,0 @@
-Project 1 Scope
-Target object: shoe
-Task type: binary object detection (shoe vs no shoe)
-Embedded platform: ESP32-S3-EYE
-Planned input tensor: grayscale, small image (target 96x96x1 or 64x64x1)
-Final device output: print whether shoe is detected, plus inference time
-HW3 milestone code preserved under test_programs/

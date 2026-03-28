@@ -1,3 +1,0 @@
-Input      True label   Keras        TFLite Python   TFLite ESP32
-Image 1    automobile   truck        truck           truck
-Image 2    horse        horse        horse           horse
